@@ -2301,94 +2301,48 @@
 
         // --- Core Functions Defined BEFORE Initialization ---
 
-        async function runOptimizer() {
-            optimizeButton.disabled = true;
-            optimizeButton.textContent = 'Optimizing...';
-            await new Promise(resolve => setTimeout(resolve, 10));
+        async function runZonalOptimizer(zonalOptimizerCtx) {
+            const { hourlyData, dispatchAssets, generationTypes, etrCapacities, ppConfig, fundamentalCalibrator, baseScalars: baseScalarsIn, dailyGasPricesData, historicalAvgPrice, userElccOverrides, csvHardcodedElcc, currentTaxCredits, conf, iso, year, prmTarget, sensitivity, reliabilitySignalWeight, initialCapacities, hurdleRates, annualCaps, techFinancialParams, scheduledBuilds: scheduledBuildsIn, sliderMins, sliderMaxs } = zonalOptimizerCtx;
 
-            try {
-                // Get current ISO and year for scheduled builds lookup
-                const iso = document.getElementById('isoSelector').value;
-                const year = document.getElementById('yearSelector').value;
+            let baseScalars = baseScalarsIn;
 
-                const maxIterations = 100; 
-                const unservedThreshold = 100; // MWh
-                const currentCapacities = {};
-            
-            // FIX 1: Capture initial baseline capacities BEFORE the optimization loop
+            const maxIterations = 100;
+            const unservedThreshold = 100; // MWh
+            const currentCapacities = {};
+
+            // Capture initial baseline capacities BEFORE the optimization loop
             // This prevents "baseline drift" when the optimizer is run multiple times
             const initialBaselineCapacities = {};
-            
+
             generationTypes.forEach(tech => {
-                const slider = document.getElementById(`${tech.id}-slider`);
-                if(slider) {
-                    const sliderValue = parseInt(slider.value);
-                    currentCapacities[tech.id] = sliderValue;
-                    initialBaselineCapacities[tech.id] = sliderValue;
+                if (initialCapacities[tech.id] !== undefined) {
+                    const capValue = initialCapacities[tech.id];
+                    currentCapacities[tech.id] = capValue;
+                    initialBaselineCapacities[tech.id] = capValue;
                 }
             });
-            
-            // FIX 2: Track per-technology learning rate multipliers for adaptive step sizing
-            // This allows dampening specific resources when they oscillate
+
+            // Track per-technology learning rate multipliers for adaptive step sizing
             const techLearningMultipliers = {};
-            const prevIrrStates = {}; // Track whether each tech was above or below hurdle in previous iteration
-            const lastIrrResults = {}; // Track IRR results from previous iteration for warm-start
-            const scheduledBuilds = {}; // Cache scheduled builds for each technology
+            const prevIrrStates = {};
+            const lastIrrResults = {};
+            const scheduledBuilds = {};
             generationTypes.forEach(tech => {
                 techLearningMultipliers[tech.id] = 1.0;
-                prevIrrStates[tech.id] = null; // null = unknown, true = above hurdle, false = below hurdle
-                scheduledBuilds[tech.id] = getScheduledBuilds(iso, year, tech.id);
+                prevIrrStates[tech.id] = null;
+                scheduledBuilds[tech.id] = scheduledBuildsIn[tech.id] !== undefined ? scheduledBuildsIn[tech.id] : getScheduledBuilds(iso, year, tech.id);
             });
-
-            const txMarginInput = document.getElementById('tx-margin-input');
-            
-            // Read the PRM Target directly from the input for optimization logic
-            const prmTarget = parseFloat(document.getElementById('prm-target').value);
-
-            // Find New Build Gas CCGT tech for Net CONE calculation
-            const gasCcgtTech = generationTypes.find(t => t.id === 'new-gas-ccgt');
-
-            const conf = {
-                gasCost: parseFloat(document.getElementById('gas-fuel-cost').value),
-                bidMargin: parseFloat(document.getElementById('bid-margin').value),
-                storageDur: parseFloat(document.getElementById('storage-duration').value),
-                storageRTE: parseFloat(document.getElementById('storage-rte').value) / 100,
-                impSlope: parseFloat(document.getElementById('import-slope').value),
-                impInt: parseFloat(document.getElementById('import-intercept').value),
-                txMargin: txMarginInput ? parseFloat(txMarginInput.value) : 15.0,
-                txSuppression: parseFloat(document.getElementById('tx-suppression').value),
-                prmTarget: (parseFloat(document.getElementById('prm-target')?.value) || 15) / 100,
-                rpsTarget: (parseFloat(document.getElementById('rps-target')?.value) || 40) / 100,
-                capPriceCap: parseFloat(document.getElementById('cap-price-cap')?.value) || 800,
-                capPriceFloor: parseFloat(document.getElementById('cap-price-floor')?.value) || 0,
-                capRmThreshold: parseFloat(document.getElementById('cap-rm-threshold')?.value) || 15,
-                floorRmThreshold: parseFloat(document.getElementById('floor-rm-threshold')?.value) || 40,
-                recAcp: parseFloat(document.getElementById('rec-acp')?.value) || 50,
-                recFloor: parseFloat(document.getElementById('rec-floor')?.value) || 1,
-                recCapThreshold: (parseFloat(document.getElementById('rec-cap-threshold')?.value) || 75) / 100,
-                recFloorThreshold: (parseFloat(document.getElementById('rec-floor-threshold')?.value) || 100) / 100,
-                energyPriceCap: parseFloat(document.getElementById('energy-price-cap')?.value) || 5000,
-                elccPeakHours: parseInt(document.getElementById('elcc-peak-hours')?.value) || 100,
-                gasCapex: parseFloat(document.getElementById('capex-new-gas-ccgt')?.value) || (gasCcgtTech?.capex ?? 1200),
-                gasOpex: parseFloat(document.getElementById('opex-new-gas-ccgt')?.value) || (gasCcgtTech?.opex ?? 1000)
-            };
 
             const peakLoad = Math.max(...hourlyData.map(h => h.Load_MW));
 
             // Pre-calculate hourly gas prices once for all iterations
             const hourlyGasPrices = preCalculateHourlyGasPrices(conf.gasCost);
-            
-            // Initialize maxDelta before the loop so it can be used in convergence checks
-            let maxDelta = Infinity;
 
-            // Read sensitivity from the new input (default to 0.04 if missing)
-            const sensitivityInput = document.getElementById('optimizer-sensitivity');
-            const parsedSensitivity = sensitivityInput ? parseFloat(sensitivityInput.value) : NaN;
-            const sensitivity = !isNaN(parsedSensitivity) ? parsedSensitivity / 100 : 0.04;
+            let maxDelta = Infinity;
+            let marketMetrics, finData;
 
             for (let i = 0; i < maxIterations; i++) {
-                // Decay Factor: Linear decay from 1.0 to MIN_DECAY_FACTOR over first DECAY_TRANSITION_POINT% of iterations, then hold at MIN_DECAY_FACTOR
-                const decayFactor = i < maxIterations * DECAY_TRANSITION_POINT 
+                const decayFactor = i < maxIterations * DECAY_TRANSITION_POINT
                     ? 1.0 - ((1.0 - MIN_DECAY_FACTOR) * (i / (maxIterations * DECAY_TRANSITION_POINT)))
                     : MIN_DECAY_FACTOR;
 
@@ -2399,42 +2353,37 @@
                 generationTypes.forEach(tech => {
                     if (currentCapacities[tech.id] === 0) {
                         originalZeroCaps[tech.id] = true;
-                        currentCapacities[tech.id] = 100; 
+                        currentCapacities[tech.id] = 100;
                     }
                 });
 
-                let coreResults = await runCoreModel(currentCapacities, conf, hourlyGasPrices);
-                
-                // Calculate total system capacity for postProcessPrices
+                let coreResults = await runCoreModel({ hourlyData, dispatchAssets, generationTypes, etrCapacities, installedCapacities: currentCapacities, conf, hourlyGasPrices, ppConfig, fundamentalCalibrator, baseScalars });
+
                 let totalSystemCapacity = 0;
                 generationTypes.forEach(tech => {
                     totalSystemCapacity += currentCapacities[tech.id] || 0;
                 });
-                
-                // Calculate hourly reserve margins using same logic as CSV export
-                const hourlyReserveMargins = calculateHourlyReserveMargins(coreResults, currentCapacities);
-                
-                const currentYear = document.getElementById('yearSelector').value;
-                
-                // Call postProcessPrices with new structural scarcity model signature
+
+                const hourlyReserveMargins = calculateHourlyReserveMargins(coreResults, currentCapacities, hourlyData, generationTypes);
+
                 const ppResult = postProcessPrices(
-                    coreResults.hourlyPrices,           // fundamentalPrices
-                    coreResults.netLoadAfterStorage,    // netLoad
-                    totalSystemCapacity,                // totalSystemCapacity
-                    conf.gasCost,                       // gasPrice
-                    currentYear,                        // year
-                    ppConfig,                           // ppConfig
-                    hourlyReserveMargins,               // hourlyReserveMargins
-                    hourlyGasPrices                     // hourlyGasPrices (pre-calculated)
+                    coreResults.hourlyPrices,
+                    coreResults.netLoadAfterStorage,
+                    totalSystemCapacity,
+                    conf.gasCost,
+                    year,
+                    ppConfig,
+                    hourlyReserveMargins,
+                    hourlyGasPrices,
+                    fundamentalCalibrator, baseScalars, historicalAvgPrice, dailyGasPricesData
                 );
                 const finalPrices = ppResult.finalPrices;
-                
-                // Calculate market metrics fresh every iteration to ensure proper price feedback
-                const marketMetrics = calculateMarketMetrics(coreResults, currentCapacities, conf);
-                
-                let finData = getFinancialsWithMetrics(coreResults.hourlyGeneration, finalPrices, currentCapacities, marketMetrics, conf, lastIrrResults, coreResults.existingGasWeightedHeatRate);
+                if (ppResult.baseScalars !== undefined) baseScalars = ppResult.baseScalars;
 
-                // Update lastIrrResults with current iteration's IRR values for next iteration
+                marketMetrics = calculateMarketMetrics(coreResults, currentCapacities, conf, hourlyData, generationTypes, userElccOverrides, csvHardcodedElcc);
+
+                finData = getFinancialsWithMetrics(coreResults.hourlyGeneration, finalPrices, currentCapacities, marketMetrics, conf, lastIrrResults, coreResults.existingGasWeightedHeatRate, null, null, null, null);
+
                 generationTypes.forEach(tech => {
                     if (finData[tech.id] && !isNaN(finData[tech.id].irr)) {
                         lastIrrResults[tech.id] = finData[tech.id].irr;
@@ -2442,7 +2391,7 @@
                 });
 
                 let totalChange = 0;
-                maxDelta = 0; // Reset maxDelta for this iteration
+                maxDelta = 0;
 
                 const unservedIndices = [];
                 const totalThermal = coreResults.fullDispatchStack.reduce((s, p) => s + p.Capacity_MW, 0);
@@ -2453,20 +2402,20 @@
                 }
 
                 generationTypes.forEach(tech => {
-                    if (tech.id === 'coal' || tech.id === 'oil' || tech.id === 'other') return; 
-                    const hurdleEl = document.getElementById(`hurdle-${tech.id}`);
-                    if (!hurdleEl) return;
-                    
-                    const targetIRR = parseFloat(hurdleEl.value);
+                    if (tech.id === 'coal' || tech.id === 'oil' || tech.id === 'other') return;
+
+                    const targetIRR = hurdleRates[tech.id];
+                    if (targetIRR === undefined) return;
+
                     let currentIRR = finData[tech.id].irr;
-                    
+
                     if (isNaN(currentIRR)) {
                         if (originalZeroCaps[tech.id]) currentCapacities[tech.id] = 0;
                         return;
                     }
 
                     const irrError = currentIRR - targetIRR;
-                    
+
                     let unservedCF = 0;
                     if (unservedIndices.length > 0) {
                         if (tech.type === 'firm' || tech.id === 'existing-gas' || tech.id === 'new-gas-ccgt' || tech.id === 'new-gas-ct' || tech.id === 'coal') {
@@ -2480,7 +2429,7 @@
 
                             if (arr) {
                                 unservedIndices.forEach(idx => {
-                                    genDuringCrunch += Math.max(0, arr[idx]); 
+                                    genDuringCrunch += Math.max(0, arr[idx]);
                                 });
                                 const cap = currentCapacities[tech.id];
                                 if (cap > 0) {
@@ -2492,106 +2441,66 @@
                          unservedCF = (marketMetrics.elcc[tech.id] || 0);
                     }
 
-                    // Use ELCC-based Planning Reserve Margin from calculateMarketMetrics()
-                    // This uses accredited capacity (installed capacity × ELCC) rather than
-                    // actual generation at peak hour, aligning with RA market methodologies
-                    let currentPRM = marketMetrics.planningReserveMargin; 
-                    // Clamp prmGap to non-negative: reliability signal only boosts capacity when reserves 
-                    // are low, but never penalizes profitable capacity when reserves are high.
-                    // This allows profitable assets (like Storage) to build purely on economics even 
-                    // if the reserve margin is already met by Wind/Solar.
+                    let currentPRM = marketMetrics.planningReserveMargin;
                     let prmGap = Math.max(0, prmTarget - currentPRM);
-                    
+
                     let reliabilityRaw = unservedCF * prmGap;
-                    
-                    // Read the reliability signal weight from user input (default 2.0)
-                    const weightInput = document.getElementById('reliability-signal-weight');
-                    const parsedWeight = weightInput ? parseFloat(weightInput.value) : NaN;
-                    const reliabilitySignalWeight = !isNaN(parsedWeight) ? parsedWeight : 2.0;
-                    const reliabilitySignal = reliabilityRaw * reliabilitySignalWeight; 
-                    
+                    const reliabilitySignal = reliabilityRaw * reliabilitySignalWeight;
+
                     const totalSignal = irrError + reliabilitySignal;
 
-                    const slider = document.getElementById(`${tech.id}-slider`);
-                    let minCapacity = parseInt(slider.min) || 0;
-                    
-                    // Get scheduled builds for this technology (cached from before the loop)
+                    let minCapacity = sliderMins[tech.id] || 0;
+
                     const scheduledBuildMw = scheduledBuilds[tech.id] || 0;
-                    
-                    // FIX 1: Use etrCapacities as the baseline for annual cap constraints
-                    // etrCapacities is set when year/ISO is selected and represents the true starting capacity
-                    // This prevents "baseline drift" when the optimizer is run multiple times
-                    // Fallback chain: etrCapacities -> initialBaselineCapacities -> current slider value
-                    // Add scheduledBuildMw to ensure optimizer sees the full valid starting point
-                    const baselineCapacity = etrCapacities[tech.id] !== undefined 
-                        ? etrCapacities[tech.id] 
-                        : (initialBaselineCapacities[tech.id] !== undefined 
-                            ? initialBaselineCapacities[tech.id] 
-                            : (parseInt(slider.value) || 0));
+
+                    const baselineCapacity = etrCapacities[tech.id] !== undefined
+                        ? etrCapacities[tech.id]
+                        : (initialBaselineCapacities[tech.id] !== undefined
+                            ? initialBaselineCapacities[tech.id]
+                            : (initialCapacities[tech.id] || 0));
                     const staticBaseCapacity = baselineCapacity + scheduledBuildMw;
-                    
-                    // Set minimum capacity to the slider's min value (locked capacity from project DB)
+
                     if (etrCapacities[tech.id] !== undefined) {
                         minCapacity = Math.max(minCapacity, etrCapacities[tech.id]);
                     }
-                    
-                    // Get the annual capacity cap from the input field
-                    // Calculate it from the etrCapacities baseline (not dynamic current capacity)
-                    const annCapInput = document.getElementById(`ann-cap-${tech.id}`);
-                    let parsedAnnCap = annCapInput ? parseInt(annCapInput.value) : NaN;
-                    
-                    // Ensure the annual cap is at least 20% of the etrCapacities baseline
-                    // This prevents the annual cap from drifting upward on sequential runs
+
+                    let parsedAnnCap = annualCaps[tech.id];
+
                     const minAnnCapFromBaseline = calculateAnnualCap(staticBaseCapacity, tech.id);
                     if (isNaN(parsedAnnCap) || parsedAnnCap < minAnnCapFromBaseline) {
                         parsedAnnCap = minAnnCapFromBaseline;
-                        // Update the input field to reflect the corrected value
-                        if (annCapInput) {
-                            annCapInput.value = parsedAnnCap;
-                        }
                     }
                     const annualCapLimit = parsedAnnCap;
 
-                    // Step Calculation: rawAdjustment = AnnualCapLimit * sensitivity * totalSignal * decayFactor * techLearningMultiplier
                     const rawAdjustment = annualCapLimit * sensitivity * totalSignal * decayFactor * techLearningMultipliers[tech.id];
-                    
-                    // Clamping: Clamp the final adjustment to ± iterationStepLimit (which is AnnualCapLimit / 3)
+
                     const iterationStepLimit = annualCapLimit / 3;
                     let adjustment = Math.max(-iterationStepLimit, Math.min(iterationStepLimit, rawAdjustment));
-                    
-                    // Rounding: Round to the nearest integer (1 MW)
+
                     adjustment = Math.round(adjustment);
-                    
-                    // Apply annual cap constraint using etrCapacities baseline
-                    // This ensures maximum capacity is fixed based on original year selection, not optimized values
+
                     const maxCapWithAnnCap = staticBaseCapacity + annualCapLimit;
                     const minCapWithAnnCap = Math.max(0, staticBaseCapacity - annualCapLimit);
-                    
-                    const maxCapacity = Math.min(parseInt(slider.max), maxCapWithAnnCap);
+
+                    const maxCapacity = Math.min(sliderMaxs[tech.id] || 999999, maxCapWithAnnCap);
                     const effectiveMinCapacity = Math.max(minCapacity, minCapWithAnnCap);
-                    
+
                     const oldCap = currentCapacities[tech.id];
                     let newCap = oldCap + adjustment;
-                    
-                    // FIX 2: Detect if we're being clamped by the annual cap boundary
+
                     const isClampedByAnnCap = (newCap > maxCapWithAnnCap) || (newCap < minCapWithAnnCap);
-                    
+
                     newCap = Math.max(effectiveMinCapacity, Math.min(maxCapacity, newCap));
-                    
+
                     if (originalZeroCaps[tech.id] && newCap < 100) newCap = 0;
-                    
-                    // FIX 2: Detect oscillation (swing from under-hurdle to over-hurdle or vice versa)
-                    const currentIrrState = currentIRR >= targetIRR; // true = above/at hurdle, false = below
+
+                    const currentIrrState = currentIRR >= targetIRR;
                     const prevIrrState = prevIrrStates[tech.id];
                     const isOscillating = (prevIrrState !== null) && (prevIrrState !== currentIrrState);
-                    
-                    // FIX 2: If we hit the annual cap clamp OR we're oscillating, dampen the learning rate
-                    // This allows smaller, more refined steps to find the economic equilibrium
+
                     if (isClampedByAnnCap || isOscillating) {
-                        // Reduce the learning rate multiplier for this tech by 50% (min 0.1)
                         techLearningMultipliers[tech.id] = Math.max(0.1, techLearningMultipliers[tech.id] * 0.5);
-                        
-                        // If oscillating, also try a smaller step: halve the adjustment
+
                         if (isOscillating && Math.abs(adjustment) > 1) {
                             adjustment = Math.round(adjustment / 2);
                             newCap = oldCap + adjustment;
@@ -2599,35 +2508,126 @@
                             if (originalZeroCaps[tech.id] && newCap < 100) newCap = 0;
                         }
                     }
-                    
-                    // Update previous IRR state for next iteration
+
                     prevIrrStates[tech.id] = currentIrrState;
-                    
+
                     const trueStartCap = preProbeCapacities[tech.id];
                     const delta = Math.abs(newCap - trueStartCap);
-                    
+
                     totalChange += delta;
                     if (delta > maxDelta) maxDelta = delta;
                     currentCapacities[tech.id] = newCap;
                 });
 
-                // Convergence check (Stricter: Requires PRM to be within 0.5 of target)
                 if (i > 0 && maxDelta < 100 && coreResults.unservedEnergy < unservedThreshold && marketMetrics.planningReserveMargin >= (prmTarget - 0.5)) {
                     break;
                 }
             }
-            
-            for (const techId in currentCapacities) {
-                const slider = document.getElementById(`${techId}-slider`);
-                if(slider) {
-                    slider.value = currentCapacities[techId];
-                    updateSliderValue(slider.id);
+
+            return { finalCapacities: currentCapacities, marketMetrics, financials: finData };
+        }
+
+        async function runOptimizer() {
+            const optimizeButton = document.getElementById('optimizeAllButton') || document.querySelector('[onclick*="runOptimizer"]');
+            if (optimizeButton) { optimizeButton.disabled = true; optimizeButton.textContent = 'Optimizing...'; }
+            await new Promise(resolve => setTimeout(resolve, 10));
+
+            try {
+                const iso = document.getElementById('isoSelector').value;
+                const year = document.getElementById('yearSelector').value;
+
+                const txMarginInput = document.getElementById('tx-margin-input');
+                const gasCcgtTech = generationTypes.find(t => t.id === 'new-gas-ccgt');
+
+                const conf = {
+                    gasCost: parseFloat(document.getElementById('gas-fuel-cost').value),
+                    bidMargin: parseFloat(document.getElementById('bid-margin').value),
+                    storageDur: parseFloat(document.getElementById('storage-duration').value),
+                    storageRTE: parseFloat(document.getElementById('storage-rte').value) / 100,
+                    impSlope: parseFloat(document.getElementById('import-slope').value),
+                    impInt: parseFloat(document.getElementById('import-intercept').value),
+                    txMargin: txMarginInput ? parseFloat(txMarginInput.value) : 15.0,
+                    txSuppression: parseFloat(document.getElementById('tx-suppression').value),
+                    prmTarget: (parseFloat(document.getElementById('prm-target')?.value) || 15) / 100,
+                    rpsTarget: (parseFloat(document.getElementById('rps-target')?.value) || 40) / 100,
+                    capPriceCap: parseFloat(document.getElementById('cap-price-cap')?.value) || 800,
+                    capPriceFloor: parseFloat(document.getElementById('cap-price-floor')?.value) || 0,
+                    capRmThreshold: parseFloat(document.getElementById('cap-rm-threshold')?.value) || 15,
+                    floorRmThreshold: parseFloat(document.getElementById('floor-rm-threshold')?.value) || 40,
+                    recAcp: parseFloat(document.getElementById('rec-acp')?.value) || 50,
+                    recFloor: parseFloat(document.getElementById('rec-floor')?.value) || 1,
+                    recCapThreshold: (parseFloat(document.getElementById('rec-cap-threshold')?.value) || 75) / 100,
+                    recFloorThreshold: (parseFloat(document.getElementById('rec-floor-threshold')?.value) || 100) / 100,
+                    energyPriceCap: parseFloat(document.getElementById('energy-price-cap')?.value) || 5000,
+                    elccPeakHours: parseInt(document.getElementById('elcc-peak-hours')?.value) || 100,
+                    gasCapex: parseFloat(document.getElementById('capex-new-gas-ccgt')?.value) || (gasCcgtTech?.capex ?? 1200),
+                    gasOpex: parseFloat(document.getElementById('opex-new-gas-ccgt')?.value) || (gasCcgtTech?.opex ?? 1000)
+                };
+
+                // Build per-tech params from DOM
+                const initialCapacitiesMap = {};
+                const hurdleRatesMap = {};
+                const annualCapsMap = {};
+                const sliderMinsMap = {};
+                const sliderMaxsMap = {};
+                const techFinancialParamsMap = {};
+                const scheduledBuildsMap = {};
+                generationTypes.forEach(tech => {
+                    const slider = document.getElementById(`${tech.id}-slider`);
+                    if (slider) {
+                        initialCapacitiesMap[tech.id] = parseInt(slider.value);
+                        sliderMinsMap[tech.id] = parseInt(slider.min) || 0;
+                        sliderMaxsMap[tech.id] = parseInt(slider.max) || 999999;
+                    }
+                    const hurdleEl = document.getElementById(`hurdle-${tech.id}`);
+                    hurdleRatesMap[tech.id] = hurdleEl ? parseFloat(hurdleEl.value) : 10;
+                    const annCapEl = document.getElementById(`ann-cap-${tech.id}`);
+                    annualCapsMap[tech.id] = annCapEl ? parseInt(annCapEl.value) : NaN;
+                    techFinancialParamsMap[tech.id] = {
+                        capex: parseFloat(document.getElementById(`capex-${tech.id}`)?.value) || 0,
+                        opex: parseFloat(document.getElementById(`opex-${tech.id}`)?.value) || 0,
+                        life: parseInt(document.getElementById(`life-${tech.id}`)?.value) || 30,
+                        costCurveDist: parseFloat(document.getElementById(`cost-curve-dist-${tech.id}`)?.value) || 20,
+                        annCap: annualCapsMap[tech.id],
+                        asRevAdder: parseFloat(document.getElementById(`as-rev-${tech.id}`)?.value) || 0
+                    };
+                    scheduledBuildsMap[tech.id] = getScheduledBuilds(iso, year, tech.id);
+                });
+
+                const prmTarget = parseFloat(document.getElementById('prm-target').value);
+                const sensitivityInput = document.getElementById('optimizer-sensitivity');
+                const parsedSensitivity = sensitivityInput ? parseFloat(sensitivityInput.value) : NaN;
+                const sensitivity = !isNaN(parsedSensitivity) ? parsedSensitivity / 100 : 0.04;
+                const weightInput = document.getElementById('reliability-signal-weight');
+                const parsedWeight = weightInput ? parseFloat(weightInput.value) : NaN;
+                const reliabilitySignalWeight = !isNaN(parsedWeight) ? parsedWeight : 2.0;
+
+                const result = await runZonalOptimizer({
+                    hourlyData, dispatchAssets, generationTypes, etrCapacities,
+                    ppConfig, fundamentalCalibrator, baseScalars,
+                    dailyGasPricesData, historicalAvgPrice, userElccOverrides, csvHardcodedElcc, currentTaxCredits,
+                    conf, iso, year, prmTarget, sensitivity, reliabilitySignalWeight,
+                    initialCapacities: initialCapacitiesMap,
+                    hurdleRates: hurdleRatesMap,
+                    annualCaps: annualCapsMap,
+                    techFinancialParams: techFinancialParamsMap,
+                    scheduledBuilds: scheduledBuildsMap,
+                    sliderMins: sliderMinsMap,
+                    sliderMaxs: sliderMaxsMap
+                });
+
+                // Update DOM with results
+                for (const techId in result.finalCapacities) {
+                    const slider = document.getElementById(`${techId}-slider`);
+                    if (slider) {
+                        slider.value = result.finalCapacities[techId];
+                        updateSliderValue(slider.id);
+                    }
                 }
-            }
-            await runModel();
+
+                await runModel();
             } finally {
-                optimizeButton.disabled = false;
-                optimizeButton.textContent = 'Run Optimizer';
+                if (optimizeButton) { optimizeButton.disabled = false; optimizeButton.textContent = 'Run Optimizer'; }
             }
         }
 
@@ -3261,7 +3261,8 @@
                         modelResults.marketMetrics, 
                         confForFinancials, 
                         {}, 
-                        modelResults.existingGasWeightedHeatRate
+                        modelResults.existingGasWeightedHeatRate,
+                        null, null, null, null
                     );
                 }
 
@@ -5951,11 +5952,11 @@
                 const hourlyGasPrices = preCalculateHourlyGasPrices(conf.gasCost);
                 
                 // Run core model to get raw prices
-                const coreResults = await runCoreModel(installedCapacities, conf, hourlyGasPrices);
+                const coreResults = await runCoreModel({ hourlyData, dispatchAssets, generationTypes, etrCapacities, installedCapacities, conf, hourlyGasPrices, ppConfig, fundamentalCalibrator, baseScalars });
                 const rawPrices = coreResults.hourlyPrices;
                 
                 // Calculate hourly reserve margins
-                const hourlyReserveMargins = calculateHourlyReserveMargins(coreResults, installedCapacities);
+                const hourlyReserveMargins = calculateHourlyReserveMargins(coreResults, installedCapacities, hourlyData, generationTypes);
                 
                 // Get historical prices for calibration
                 // Need to extract actual prices from the historical data
@@ -6177,8 +6178,10 @@
                 cachedYear,
                 ppConfig,
                 cachedHourlyReserveMargins,  // Pass cached hourly reserve margins
-                cachedHourlyGasPrices        // Pass cached hourly gas prices
+                cachedHourlyGasPrices,       // Pass cached hourly gas prices
+                fundamentalCalibrator, baseScalars, historicalAvgPrice, dailyGasPricesData
             );
+            if (ppResult.baseScalars !== undefined) baseScalars = ppResult.baseScalars;
             
             // Recalculate sim price metrics from the new post-processed prices
             simPriceMetrics = calculatePriceMetrics(ppResult.finalPrices);
@@ -6700,7 +6703,7 @@
                 // Pre-calculate hourly gas prices
                 const hourlyGasPrices = preCalculateHourlyGasPrices(conf.gasCost);
                 
-                const coreResults = await runCoreModel(capacities, conf, hourlyGasPrices);
+                const coreResults = await runCoreModel({ hourlyData, dispatchAssets, generationTypes, etrCapacities, installedCapacities: capacities, conf, hourlyGasPrices, ppConfig, fundamentalCalibrator, baseScalars });
                 
                 // Calculate total system capacity for postProcessPrices
                 let totalSystemCapacity = 0;
@@ -6709,7 +6712,7 @@
                 });
                 
                 // Calculate hourly reserve margins using same logic as CSV export
-                const hourlyReserveMargins = calculateHourlyReserveMargins(coreResults, capacities);
+                const hourlyReserveMargins = calculateHourlyReserveMargins(coreResults, capacities, hourlyData, generationTypes);
                 
                 // Call postProcessPrices with new structural scarcity model signature
                 const ppResult = postProcessPrices(
@@ -6720,9 +6723,11 @@
                     year,                               // year
                     ppConfig,                           // ppConfig
                     hourlyReserveMargins,               // hourlyReserveMargins
-                    hourlyGasPrices                     // hourlyGasPrices (pre-calculated)
+                    hourlyGasPrices,                     // hourlyGasPrices (pre-calculated)
+                    fundamentalCalibrator, baseScalars, historicalAvgPrice, dailyGasPricesData
                 );
                 const finalPrices = ppResult.finalPrices;
+                if (ppResult.baseScalars !== undefined) baseScalars = ppResult.baseScalars;
                 avgEnergyPrice = finalPrices.reduce((a, b) => a + b, 0) / finalPrices.length;
                 
                 // Calculate price metrics including 2hr spread
@@ -6730,7 +6735,7 @@
                 spread2hr = priceMetrics ? priceMetrics.spread2hr : 0;
                 
                 // Calculate market metrics to get ELCC values
-                const marketMetrics = calculateMarketMetrics(coreResults, capacities, conf);
+                const marketMetrics = calculateMarketMetrics(coreResults, capacities, conf, hourlyData, generationTypes, userElccOverrides, csvHardcodedElcc);
                 elccValues = (marketMetrics && marketMetrics.elcc) ? marketMetrics.elcc : {};
                 
                 // Override ELCC values with user overrides (from input fields)
@@ -6745,7 +6750,7 @@
                 });
                 
                 // Calculate IRR values using getFinancialsWithMetrics
-                const financials = getFinancialsWithMetrics(coreResults.hourlyGeneration, finalPrices, capacities, marketMetrics, conf, {}, coreResults.existingGasWeightedHeatRate);
+                const financials = getFinancialsWithMetrics(coreResults.hourlyGeneration, finalPrices, capacities, marketMetrics, conf, {}, coreResults.existingGasWeightedHeatRate, null, null, null, null);
                 generationTypes.forEach(tech => {
                     if (tech.id !== 'coal' && tech.id !== 'oil' && tech.id !== 'other' && financials[tech.id]) {
                         irrValues[tech.id] = financials[tech.id].irr;
@@ -6847,7 +6852,7 @@
         }
         // --- Core Model Logic ---
         function updateFinancialTable(hourlyGeneration, hourlyPrices, installedCapacities, totalCost, unservedEnergy, peakUnservedEnergy, reserveMargin, marketMetrics, conf, existingGasWeightedHeatRate) {
-            const financials = getFinancialsWithMetrics(hourlyGeneration, hourlyPrices, installedCapacities, marketMetrics, conf, {}, existingGasWeightedHeatRate);
+            const financials = getFinancialsWithMetrics(hourlyGeneration, hourlyPrices, installedCapacities, marketMetrics, conf, {}, existingGasWeightedHeatRate, null, null, null, null);
             
             // Update Summary Cards using cached elements
             const set = (id, txt) => { const el = uiCache[id]; if(el) el.textContent = txt; };
@@ -6908,7 +6913,8 @@
          * @param {Object} installedCapacities - Object with installed capacity for each technology
          * @returns {Array} Array of 8760 reserve margin values (as decimals, e.g., 0.15 for 15%)
          */
-        function calculateHourlyReserveMargins(coreResults, installedCapacities) {
+        function calculateHourlyReserveMargins(coreResults, installedCapacities, zHourlyData, zGenerationTypes) {
+            const hourlyData = zHourlyData; const generationTypes = zGenerationTypes;
             const hourlyReserveMargins = new Float64Array(8760);
             
             // Calculate total thermal dispatchable capacity from the dispatch stack
@@ -6995,7 +7001,7 @@
             const hourlyGasPrices = preCalculateHourlyGasPrices(conf.gasCost);
             
             // 3. Execute Core Model with the new optimized argument
-            const coreResults = await runCoreModel(installedCapacities, conf, hourlyGasPrices);       
+            const coreResults = await runCoreModel({ hourlyData, dispatchAssets, generationTypes, etrCapacities, installedCapacities, conf, hourlyGasPrices, ppConfig, fundamentalCalibrator, baseScalars });       
             
             // Calculate total system capacity (sum of all installed capacities: thermal, renewables, and storage)
             let totalSystemCapacity = 0;
@@ -7006,7 +7012,7 @@
             // Calculate hourly reserve margins using same logic as CSV export
             // Reserve Margin = ((Available Generation / Load) - 1)
             // Where Available Generation = Total Dispatchable Capacity + Storage Capacity + Hourly Renewable/Firm Generation
-            const hourlyReserveMargins = calculateHourlyReserveMargins(coreResults, installedCapacities);
+            const hourlyReserveMargins = calculateHourlyReserveMargins(coreResults, installedCapacities, hourlyData, generationTypes);
             
             const currentYear = document.getElementById('yearSelector').value;
             
@@ -7078,9 +7084,11 @@
                 currentYear,                        // year
                 ppConfig,                           // ppConfig
                 hourlyReserveMargins,               // hourlyReserveMargins
-                hourlyGasPrices                     // hourlyGasPrices (pre-calculated)
+                hourlyGasPrices,                     // hourlyGasPrices (pre-calculated)
+                fundamentalCalibrator, baseScalars, historicalAvgPrice, dailyGasPricesData
             );
             const finalPrices = ppResult.finalPrices;
+            if (ppResult.baseScalars !== undefined) baseScalars = ppResult.baseScalars;
             
             // Calculate and store simulation price metrics for base calibration years
             // This allows comparison with historical data for the same period
@@ -7094,7 +7102,7 @@
                 rawEnergyPrices: ppResult.rawEnergyPrices,
                 stretchFactor: ppResult.stretchFactor
             };
-            const marketMetrics = calculateMarketMetrics(modelResults, installedCapacities, conf);
+            const marketMetrics = calculateMarketMetrics(modelResults, installedCapacities, conf, hourlyData, generationTypes, userElccOverrides, csvHardcodedElcc);
             
             // Skip UI updates in headless mode (for CSV export performance) or during optimization iterations
             if (!isHeadless && !skipUIUpdates) {
@@ -7116,7 +7124,11 @@
             }
             return { ...modelResults, marketMetrics };
         }
-        function postProcessPrices(fundamentalPrices, netLoad, totalSystemCapacity, gasPrice, year, ppConfigArg, hourlyReserveMargins, hourlyGasPrices) {
+        function postProcessPrices(fundamentalPrices, netLoad, totalSystemCapacity, gasPrice, year, ppConfigArg, hourlyReserveMargins, hourlyGasPrices, zFundamentalCalibrator, zBaseScalars, zHistoricalAvgPrice, zDailyGasPricesData) {
+            const fundamentalCalibrator = zFundamentalCalibrator;
+            let baseScalarsLocal = zBaseScalars;
+            const historicalAvgPrice = zHistoricalAvgPrice;
+            const dailyGasPricesData = zDailyGasPricesData;
             // Use passed ppConfig or fall back to global
             const config = ppConfigArg || ppConfig;
             
@@ -7218,7 +7230,7 @@
             
             let calibrationScalar = 1.0;
             
-            if (isBaseYear || baseScalars == null) {
+            if (isBaseYear || baseScalarsLocal == null) {
                 if (historicalAvgPrice !== null && historicalAvgPrice > 0) {
                     // Calculate the model average price (excluding extreme values)
                     let modelPriceSum = 0;
@@ -7238,9 +7250,9 @@
                         calibrationScalar = Math.max(0.2, Math.min(3.0, calibrationScalar));
                     }
                 }
-                baseScalars = calibrationScalar;
+                baseScalarsLocal = calibrationScalar;
             } else {
-                calibrationScalar = (typeof baseScalars === 'number' && baseScalars > 0) ? baseScalars : 1.0;
+                calibrationScalar = (typeof baseScalarsLocal === 'number' && baseScalarsLocal > 0) ? baseScalarsLocal : 1.0;
             }
             
             // Apply scalar and final clamping
@@ -7254,10 +7266,13 @@
                 rawEnergyPrices: fundamentalPrices,
                 stretchFactor: stretchFactor,
                 calibratorTrained: fundamentalCalibrator.isTrained,
-                calibrationScalar: calibrationScalar
+                calibrationScalar: calibrationScalar,
+                baseScalars: baseScalarsLocal
             };
         }
-        function calculateMarketMetrics(modelResults, installedCapacities, conf) {
+        function calculateMarketMetrics(modelResults, installedCapacities, conf, zHourlyData, zGenerationTypes, zUserElccOverrides, zCsvHardcodedElcc) {
+            const hourlyData = zHourlyData; const generationTypes = zGenerationTypes;
+            const userElccOverrides = zUserElccOverrides; const csvHardcodedElcc = zCsvHardcodedElcc;
             const prmTarget = conf.prmTarget;
             const rpsTarget = conf.rpsTarget;
             const capPriceCap = conf.capPriceCap;
@@ -7437,7 +7452,8 @@
             
             return { elcc: elccValues, capacityPrice: Math.min(capPriceCap, Math.max(capPriceFloor, capacityPrice)), recPrice: Math.max(0, recPrice), renewableShare: totalLoadMWh > 0 ? totalRenewableGen / totalLoadMWh : 0, cleanEnergyShare: totalLoadMWh > 0 ? totalCleanEnergyGen / totalLoadMWh : 0, planningReserveMargin: marketStyleReserveMargin, peakReserveMargin: actualPeakReserveMargin, renewableCurtailment: renewableCurtailment };
         }
-        async function runCoreModel(installedCapacities, conf, hourlyGasPrices) {
+        async function runCoreModel(zoneCtx) {
+            const { hourlyData, dispatchAssets, generationTypes, etrCapacities, installedCapacities, conf, hourlyGasPrices, ppConfig, fundamentalCalibrator, baseScalars } = zoneCtx;
             const hourlyGeneration = {};
             generationTypes.forEach(t => hourlyGeneration[t.name] = new Float64Array(8760));
             hourlyGeneration['Storage'] = new Float64Array(8760); hourlyGeneration['Coal'] = new Float64Array(8760);
@@ -8052,10 +8068,13 @@
             // The optimizer and UI use the ELCC-based PRM from marketMetrics.planningReserveMargin.
             return { unservedEnergy, peakUnservedEnergy, totalCost, hourlyGeneration, hourlyPrices, netLoad: baseNetLoad, netLoadAfterStorage, fullDispatchStack, storagePcharge, storagePdischarge, storagePchargeProcessed, storagePdischargeProcessed, storageSOC, existingGasWeightedHeatRate };
         }
-        function getFinancialsWithMetrics(hourlyGeneration, hourlyPrices, installedCapacities, marketMetrics, conf, prevIRRs = {}, existingGasWeightedHeatRate = HEAT_RATE_EXISTING_GAS) {
+        function getFinancialsWithMetrics(hourlyGeneration, hourlyPrices, installedCapacities, marketMetrics, conf, prevIRRs = {}, existingGasWeightedHeatRate = HEAT_RATE_EXISTING_GAS, zGenerationTypes = null, zEtrCapacities = null, zCurrentTaxCredits = null, techFinancialParams = null) {
+            const generationTypes = zGenerationTypes || window.generationTypes;
+            const etrCapacities = zEtrCapacities || window.etrCapacities;
+            const currentTaxCredits = zCurrentTaxCredits || window.currentTaxCredits;
              const finCalcs = {}; generationTypes.forEach(tech => { finCalcs[tech.id] = { totalRevenue: 0, totalGeneration: 0, totalChargeCost: 0, totalChargeVolume: 0 }; });
-            const fuelCosts = { Gas: parseFloat(document.getElementById('gas-fuel-cost').value) };
-            const carbonCost = parseFloat(document.getElementById('carbon-cost').value) || 0;
+            const fuelCosts = { Gas: techFinancialParams ? techFinancialParams._gasFuelCost : parseFloat(document.getElementById('gas-fuel-cost').value) };
+            const carbonCost = techFinancialParams ? (techFinancialParams._carbonCost || 0) : (parseFloat(document.getElementById('carbon-cost').value) || 0);
             const effectiveTxMargin = Math.max(0, (conf ? conf.txMargin : 15.0) - ((installedCapacities['imports'] || 0) / 1000 * (conf ? conf.txSuppression : 1.0)));
             
             // Inverted loop: iterate Technologies (outer) then Hours (inner) for better cache performance
@@ -8121,17 +8140,20 @@
                 
                 // Determine effective ELCC: use user override if available, otherwise use calculated value
                 let effectiveElcc = marketMetrics.elcc[tech.id] || 0;
-                const elccInput = document.getElementById(`elcc-${tech.id}`);
-                if (elccInput && elccInput.dataset.elccOverride === 'true') {
-                    // User has overridden this value - use the input field value (converted from % to decimal)
-                    effectiveElcc = (parseFloat(elccInput.value) || 0) / 100;
+                if (techFinancialParams && techFinancialParams[tech.id] && techFinancialParams[tech.id].elccOverride !== undefined) {
+                    effectiveElcc = techFinancialParams[tech.id].elccOverride / 100;
+                } else {
+                    const elccInput = document.getElementById(`elcc-${tech.id}`);
+                    if (elccInput && elccInput.dataset.elccOverride === 'true') {
+                        effectiveElcc = (parseFloat(elccInput.value) || 0) / 100;
+                    }
                 }
                 
                 let capacityRevenue = capacity * (marketMetrics.capacityPrice * 365) * effectiveElcc;
-                const totalAnnualOpex = parseFloat(document.getElementById(`opex-${tech.id}`).value) * 12 * capacity;
+                const totalAnnualOpex = (techFinancialParams ? techFinancialParams[tech.id].opex : parseFloat(document.getElementById(`opex-${tech.id}`).value)) * 12 * capacity;
                 
                 // Add ancillary services revenue
-                const asRevAdder = parseFloat(document.getElementById(`as-rev-${tech.id}`)?.value) || 0;
+                const asRevAdder = techFinancialParams ? (techFinancialParams[tech.id].asRevAdder || 0) : (parseFloat(document.getElementById(`as-rev-${tech.id}`)?.value) || 0);
                 const totalAnnualAsRevenue = asRevAdder * 12 * capacity; // $/MW-Month * 12 months * capacity MW
                 
                 // Get tax credit settings for this technology
@@ -8147,7 +8169,7 @@
                 const baseCashFlow = (energyRev + recRevenue + capacityRevenue + totalAnnualAsRevenue) - totalAnnualOpex;
                 
                 // Calculate base capex (before cost curve adjustment)
-                let baseCapex = parseFloat(document.getElementById(`capex-${tech.id}`).value);
+                let baseCapex = techFinancialParams ? techFinancialParams[tech.id].capex : parseFloat(document.getElementById(`capex-${tech.id}`).value);
                 
                 // Apply Technology Cost Curve Distribution scaling
                 // This implements a linear cost curve where:
@@ -8156,8 +8178,8 @@
                 // - At 100% of annual cap: capex is increased by the full distribution % (e.g., +20%)
                 // Formula: capex cost scalar = (Tech Cost Curve Distribution %) * (((slider MW % of annual Cap MW) - 0.5) / 0.5)
                 // The (x - 0.5) / 0.5 term normalizes the range [0, 1] to [-1, 1] with midpoint at 0
-                const costCurveDistPercent = parseFloat(document.getElementById(`cost-curve-dist-${tech.id}`)?.value) || 20; // Default 20%
-                const annualCapMw = parseFloat(document.getElementById(`ann-cap-${tech.id}`)?.value) || 1000; // Fallback if not set
+                const costCurveDistPercent = techFinancialParams ? (techFinancialParams[tech.id].costCurveDist || 20) : (parseFloat(document.getElementById(`cost-curve-dist-${tech.id}`)?.value) || 20); // Default 20%
+                const annualCapMw = techFinancialParams ? (techFinancialParams[tech.id].annCap || 1000) : (parseFloat(document.getElementById(`ann-cap-${tech.id}`)?.value) || 1000); // Fallback if not set
                 const newBuildMw = Math.max(0, capacity - (etrCapacities[tech.id] || 0));
                 
                 // Calculate percentage of annual cap (0-1 range, clamped at 100%)
@@ -8202,7 +8224,7 @@
                     cf: capacity > 0 ? (totalGen / (capacity * 8760)) * 100 : 0, 
                     capturedPrice: capturedPriceDisplay, 
                     carbonCostPerMWh: carbonCostPerMWh,
-                    irr: calculateIRR_WithPTC(investment, baseCashFlow, ptcRevenue, parseInt(document.getElementById(`life-${tech.id}`).value), guess, tech.id), 
+                    irr: calculateIRR_WithPTC(investment, baseCashFlow, ptcRevenue, (techFinancialParams ? techFinancialParams[tech.id].life : parseInt(document.getElementById(`life-${tech.id}`).value)), guess, tech.id), 
                     capRevPerMWDay: marketMetrics.capacityPrice * effectiveElcc, 
                     recRevPerMWh: totalGen > 0 ? recRevenue / totalGen : 0,
                     elcc: effectiveElcc * 100
