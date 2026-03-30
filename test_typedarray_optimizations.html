@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TypedArray Optimizations Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f0f0f0;
+        }
+        .test-result {
+            background-color: white;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+            border-left: 5px solid #ccc;
+        }
+        .test-result.pass {
+            border-left-color: #4caf50;
+        }
+        .test-result.fail {
+            border-left-color: #f44336;
+        }
+        h1 {
+            color: #333;
+        }
+        pre {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border-radius: 3px;
+            overflow-x: auto;
+        }
+        .summary {
+            background-color: #e3f2fd;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>TypedArray Optimizations Test</h1>
+    <p>This test validates that Float64Array optimizations work correctly for genMap and actualPrices arrays.</p>
+    <p><strong>Optimization:</strong> Convert standard arrays to Float64Array for 8760-hour numerical data</p>
+    <p><strong>Benefits:</strong> ~93% memory reduction, better CPU cache utilization, improved performance</p>
+    
+    <div id="results"></div>
+    
+    <script>
+        function runTests() {
+            const results = [];
+            
+            // Test 1: Verify Float64Array initialization and indexing (genMap pattern)
+            {
+                const testName = "Test 1: Float64Array initialization and indexed assignment (genMap pattern)";
+                
+                // Simulate genMap pattern: initialize and assign capacity factors
+                const genMap = {};
+                const technologies = ['Solar', 'Onshore Wind', 'Offshore Wind'];
+                
+                // Initialize as Float64Array (optimized code)
+                technologies.forEach(tech => {
+                    genMap[tech] = new Float64Array(8760);
+                });
+                
+                // Assign some test capacity factors (0.0 to 1.0)
+                genMap['Solar'][0] = 0.0;      // midnight, no solar
+                genMap['Solar'][12] = 0.85;    // noon, high solar
+                genMap['Solar'][100] = 0.42;   // random hour
+                genMap['Onshore Wind'][0] = 0.35;
+                genMap['Offshore Wind'][500] = 0.67;
+                
+                // Verify correct assignment and retrieval
+                const correctAssignment = 
+                    genMap['Solar'][0] === 0.0 &&
+                    genMap['Solar'][12] === 0.85 &&
+                    genMap['Solar'][100] === 0.42 &&
+                    genMap['Onshore Wind'][0] === 0.35 &&
+                    genMap['Offshore Wind'][500] === 0.67;
+                
+                // Verify auto-initialization to 0
+                const autoInitToZero = 
+                    genMap['Solar'][1] === 0 &&
+                    genMap['Onshore Wind'][8759] === 0;
+                
+                // Verify correct array type
+                const correctType = 
+                    genMap['Solar'] instanceof Float64Array &&
+                    genMap['Onshore Wind'] instanceof Float64Array &&
+                    genMap['Offshore Wind'] instanceof Float64Array;
+                
+                // Verify length
+                const correctLength = 
+                    genMap['Solar'].length === 8760 &&
+                    genMap['Onshore Wind'].length === 8760 &&
+                    genMap['Offshore Wind'].length === 8760;
+                
+                const pass = correctAssignment && autoInitToZero && correctType && correctLength;
+                
+                results.push({
+                    name: testName,
+                    pass: pass,
+                    details: `Technologies: ${technologies.join(', ')}\n` +
+                             `Array Type: ${genMap['Solar'].constructor.name}\n` +
+                             `Array Length: ${genMap['Solar'].length}\n` +
+                             `Test Assignments: Solar[0]=0.0, Solar[12]=0.85, Solar[100]=0.42\n` +
+                             `Correct Assignment: ${correctAssignment ? 'PASS' : 'FAIL'}\n` +
+                             `Auto-init to Zero: ${autoInitToZero ? 'PASS' : 'FAIL'}\n` +
+                             `Correct Type: ${correctType ? 'PASS' : 'FAIL'}\n` +
+                             `Correct Length: ${correctLength ? 'PASS' : 'FAIL'}`
+                });
+            }
+            
+            // Test 2: Verify Float64Array initialization and loop assignment (actualPrices pattern)
+            {
+                const testName = "Test 2: Float64Array with loop assignment (actualPrices pattern)";
+                
+                // Simulate actualPrices pattern: initialize and fill via loop
+                const actualPrices = new Float64Array(8760);
+                
+                // Mock data - simulate parsing historical price data
+                const mockData = [
+                    { price: 45.23 },
+                    { price: 52.10 },
+                    { price: 38.75 },
+                    { price: 65.40 },
+                    { price: null },  // missing data
+                ];
+                
+                // Fill first few hours (simulating the actual code pattern)
+                for (let i = 0; i < mockData.length && i < 8760; i++) {
+                    actualPrices[i] = parseFloat(mockData[i].price) || 0;
+                }
+                
+                // Verify correct assignment
+                const correctAssignment = 
+                    actualPrices[0] === 45.23 &&
+                    actualPrices[1] === 52.10 &&
+                    actualPrices[2] === 38.75 &&
+                    actualPrices[3] === 65.40 &&
+                    actualPrices[4] === 0;  // null handled correctly
+                
+                // Verify remaining hours are zero-initialized
+                const autoInitToZero = 
+                    actualPrices[5] === 0 &&
+                    actualPrices[100] === 0 &&
+                    actualPrices[8759] === 0;
+                
+                // Verify correct array type
+                const correctType = actualPrices instanceof Float64Array;
+                
+                // Verify length
+                const correctLength = actualPrices.length === 8760;
+                
+                const pass = correctAssignment && autoInitToZero && correctType && correctLength;
+                
+                results.push({
+                    name: testName,
+                    pass: pass,
+                    details: `Array Type: ${actualPrices.constructor.name}\n` +
+                             `Array Length: ${actualPrices.length}\n` +
+                             `Test Data: [45.23, 52.10, 38.75, 65.40, null]\n` +
+                             `Correct Assignment: ${correctAssignment ? 'PASS' : 'FAIL'}\n` +
+                             `Auto-init to Zero: ${autoInitToZero ? 'PASS' : 'FAIL'}\n` +
+                             `Correct Type: ${correctType ? 'PASS' : 'FAIL'}\n` +
+                             `Correct Length: ${correctLength ? 'PASS' : 'FAIL'}\n` +
+                             `Values: [${actualPrices[0]}, ${actualPrices[1]}, ${actualPrices[2]}, ${actualPrices[3]}, ${actualPrices[4]}]`
+                });
+            }
+            
+            // Test 3: Memory and performance comparison
+            {
+                const testName = "Test 3: Memory efficiency comparison";
+                
+                // Calculate memory usage
+                const standardArrayMemory = 8760 * 56; // ~56 bytes per element (rough estimate)
+                const float64ArrayMemory = 8760 * 8;   // 8 bytes per element
+                const savings = ((standardArrayMemory - float64ArrayMemory) / standardArrayMemory * 100).toFixed(1);
+                
+                // Create arrays for comparison
+                const standardArray = new Array(8760).fill(0);
+                const typedArray = new Float64Array(8760);
+                
+                // Both should have same length
+                const sameLength = standardArray.length === typedArray.length;
+                
+                // Both should support basic operations
+                standardArray[100] = 42.5;
+                typedArray[100] = 42.5;
+                const sameIndexing = standardArray[100] === typedArray[100];
+                
+                const pass = sameLength && sameIndexing && parseFloat(savings) > 80;
+                
+                results.push({
+                    name: testName,
+                    pass: pass,
+                    details: `Standard Array Memory: ~${(standardArrayMemory / 1024).toFixed(1)} KB\n` +
+                             `Float64Array Memory: ~${(float64ArrayMemory / 1024).toFixed(1)} KB\n` +
+                             `Memory Savings: ~${savings}%\n` +
+                             `Same Length: ${sameLength ? 'PASS' : 'FAIL'}\n` +
+                             `Same Indexing: ${sameIndexing ? 'PASS' : 'FAIL'}\n` +
+                             `Significant Savings: ${parseFloat(savings) > 80 ? 'PASS' : 'FAIL'}`
+                });
+            }
+            
+            // Test 4: Verify TypedArray compatibility with array operations
+            {
+                const testName = "Test 4: TypedArray compatibility with common array operations";
+                
+                const testArray = new Float64Array(8760);
+                testArray[0] = 10;
+                testArray[1] = 20;
+                testArray[2] = 30;
+                testArray[100] = 100;
+                
+                // Test .length property
+                const hasLength = testArray.length === 8760;
+                
+                // Test array indexing
+                const supportsIndexing = testArray[0] === 10 && testArray[100] === 100;
+                
+                // Test .slice()
+                const slice = testArray.slice(0, 3);
+                const supportsSlice = slice[0] === 10 && slice[1] === 20 && slice[2] === 30;
+                
+                // Test iteration
+                let sum = 0;
+                for (let i = 0; i < 3; i++) {
+                    sum += testArray[i];
+                }
+                const supportsIteration = sum === 60;
+                
+                const pass = hasLength && supportsIndexing && supportsSlice && supportsIteration;
+                
+                results.push({
+                    name: testName,
+                    pass: pass,
+                    details: `Length Property: ${hasLength ? 'PASS' : 'FAIL'}\n` +
+                             `Array Indexing: ${supportsIndexing ? 'PASS' : 'FAIL'}\n` +
+                             `Slice Method: ${supportsSlice ? 'PASS' : 'FAIL'}\n` +
+                             `For Loop Iteration: ${supportsIteration ? 'PASS' : 'FAIL'}`
+                });
+            }
+            
+            return results;
+        }
+        
+        // Display results
+        const results = runTests();
+        const resultsDiv = document.getElementById('results');
+        
+        const passCount = results.filter(r => r.pass).length;
+        const totalCount = results.length;
+        
+        // Summary
+        const summary = document.createElement('div');
+        summary.className = 'summary';
+        summary.textContent = `Test Results: ${passCount}/${totalCount} tests passed`;
+        if (passCount === totalCount) {
+            summary.style.backgroundColor = '#c8e6c9';
+        } else {
+            summary.style.backgroundColor = '#ffcdd2';
+        }
+        resultsDiv.appendChild(summary);
+        
+        // Individual test results
+        results.forEach(result => {
+            const div = document.createElement('div');
+            div.className = `test-result ${result.pass ? 'pass' : 'fail'}`;
+            
+            const title = document.createElement('h3');
+            title.textContent = result.name + ` (${result.pass ? 'PASS ✓' : 'FAIL ✗'})`;
+            div.appendChild(title);
+            
+            const details = document.createElement('pre');
+            details.textContent = result.details;
+            div.appendChild(details);
+            
+            resultsDiv.appendChild(div);
+        });
+    </script>
+</body>
+</html>

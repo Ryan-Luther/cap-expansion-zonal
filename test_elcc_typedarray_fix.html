@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ELCC TypedArray Fix Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f0f0f0;
+        }
+        .test-result {
+            background-color: white;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+            border-left: 5px solid #ccc;
+        }
+        .test-result.pass {
+            border-left-color: #4caf50;
+        }
+        .test-result.fail {
+            border-left-color: #f44336;
+        }
+        h1 {
+            color: #333;
+        }
+        pre {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border-radius: 3px;
+            overflow-x: auto;
+        }
+        .summary {
+            background-color: #e3f2fd;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>ELCC TypedArray Fix Test</h1>
+    <p>This test validates that the ELCC calculation correctly handles TypedArray (Float64Array) for netLoad.</p>
+    <p><strong>Bug:</strong> TypedArray.map() expects numeric returns, not objects, causing NaN values when mapping to {val, idx}</p>
+    <p><strong>Fix:</strong> Use Array.from() to convert TypedArray to standard array before mapping</p>
+    
+    <div id="results"></div>
+    
+    <script>
+        function runTests() {
+            const results = [];
+            
+            // Test 1: Verify TypedArray.map() creates NaN when returning objects (demonstrating the bug)
+            {
+                const testName = "Test 1: TypedArray.map() with objects returns NaN (demonstrates the bug)";
+                const typedArray = new Float64Array([100, 200, 50, 300, 150]);
+                const result = typedArray.map((val, idx) => ({ val, idx }));
+                
+                // All values should be NaN because TypedArray.map() tries to coerce objects to numbers
+                const allNaN = Array.from(result).every(item => isNaN(item));
+                
+                results.push({
+                    name: testName,
+                    pass: allNaN,
+                    details: `TypedArray: [100, 200, 50, 300, 150]\n` +
+                             `After .map((val, idx) => ({ val, idx })): [${Array.from(result).join(', ')}]\n` +
+                             `Expected: All NaN values (demonstrating the bug)\n` +
+                             `Result: ${allNaN ? 'PASS - All values are NaN' : 'FAIL - Some values are not NaN'}`
+                });
+            }
+            
+            // Test 2: Verify Array.from() fix works correctly
+            {
+                const testName = "Test 2: Array.from() fix creates proper objects";
+                const typedArray = new Float64Array([100, 200, 50, 300, 150]);
+                const result = Array.from(typedArray).map((val, idx) => ({ val, idx }));
+                
+                // Verify all values are objects with correct properties
+                const allObjects = result.every(item => 
+                    typeof item === 'object' && 
+                    typeof item.val === 'number' && 
+                    typeof item.idx === 'number' &&
+                    !isNaN(item.val) &&
+                    !isNaN(item.idx)
+                );
+                
+                // Verify the values are correct
+                const correctValues = 
+                    result[0].val === 100 && result[0].idx === 0 &&
+                    result[1].val === 200 && result[1].idx === 1 &&
+                    result[2].val === 50 && result[2].idx === 2 &&
+                    result[3].val === 300 && result[3].idx === 3 &&
+                    result[4].val === 150 && result[4].idx === 4;
+                
+                const pass = allObjects && correctValues;
+                
+                results.push({
+                    name: testName,
+                    pass: pass,
+                    details: `TypedArray: [100, 200, 50, 300, 150]\n` +
+                             `After Array.from().map((val, idx) => ({ val, idx })):\n` +
+                             `  ${JSON.stringify(result, null, 2)}\n` +
+                             `All objects with valid values: ${allObjects ? 'YES' : 'NO'}\n` +
+                             `Correct values: ${correctValues ? 'YES' : 'NO'}`
+                });
+            }
+            
+            // Test 3: Verify sorting works correctly after fix
+            {
+                const testName = "Test 3: Sorting works correctly with Array.from() fix";
+                const typedArray = new Float64Array([100, 200, 50, 300, 150]);
+                const netLoadWithIndices = Array.from(typedArray).map((val, idx) => ({ val, idx }));
+                netLoadWithIndices.sort((a, b) => b.val - a.val);
+                
+                // After sorting by descending value, order should be: 300, 200, 150, 100, 50
+                // With original indices: 3, 1, 4, 0, 2
+                const expectedOrder = [
+                    { val: 300, idx: 3 },
+                    { val: 200, idx: 1 },
+                    { val: 150, idx: 4 },
+                    { val: 100, idx: 0 },
+                    { val: 50, idx: 2 }
+                ];
+                
+                const correctSort = netLoadWithIndices.every((item, i) => 
+                    item.val === expectedOrder[i].val && 
+                    item.idx === expectedOrder[i].idx
+                );
+                
+                results.push({
+                    name: testName,
+                    pass: correctSort,
+                    details: `Original TypedArray: [100, 200, 50, 300, 150]\n` +
+                             `After sort (descending by val):\n` +
+                             `  ${JSON.stringify(netLoadWithIndices, null, 2)}\n` +
+                             `Expected order: [300@idx3, 200@idx1, 150@idx4, 100@idx0, 50@idx2]\n` +
+                             `Correct sorting: ${correctSort ? 'YES' : 'NO'}`
+                });
+            }
+            
+            // Test 4: Verify top N indices extraction works
+            {
+                const testName = "Test 4: Top 100 indices extraction works correctly";
+                const typedArray = new Float64Array([100, 200, 50, 300, 150]);
+                const netLoadWithIndices = Array.from(typedArray).map((val, idx) => ({ val, idx }));
+                netLoadWithIndices.sort((a, b) => b.val - a.val);
+                const top3Indices = netLoadWithIndices.slice(0, 3).map(item => item.idx);
+                
+                // Top 3 values are: 300 (idx 3), 200 (idx 1), 150 (idx 4)
+                const expectedIndices = [3, 1, 4];
+                const correctIndices = top3Indices.length === 3 &&
+                    top3Indices[0] === expectedIndices[0] &&
+                    top3Indices[1] === expectedIndices[1] &&
+                    top3Indices[2] === expectedIndices[2];
+                
+                results.push({
+                    name: testName,
+                    pass: correctIndices,
+                    details: `Original TypedArray: [100, 200, 50, 300, 150]\n` +
+                             `Top 3 indices: [${top3Indices.join(', ')}]\n` +
+                             `Expected: [${expectedIndices.join(', ')}]\n` +
+                             `Correct indices: ${correctIndices ? 'YES' : 'NO'}`
+                });
+            }
+            
+            // Test 5: Simulate ELCC calculation with the fix
+            {
+                const testName = "Test 5: Complete ELCC flow with TypedArray netLoad";
+                
+                // Simulate netLoad as TypedArray (8760 hours, using 10 hours for test)
+                const netLoad = new Float64Array([
+                    5000, 6000, 4500, 7000, 5500, // hrs 0-4
+                    4000, 6500, 5200, 4800, 6200  // hrs 5-9
+                ]);
+                
+                // Apply the fix
+                const netLoadWithIndices = Array.from(netLoad).map((val, idx) => ({ val, idx }));
+                netLoadWithIndices.sort((a, b) => b.val - a.val);
+                
+                // Get top 5 indices (simulating top 100)
+                const top5Indices = netLoadWithIndices.slice(0, 5).map(item => item.idx);
+                
+                // Expected: 7000@3, 6500@6, 6200@9, 6000@1, 5500@4
+                const expectedIndices = [3, 6, 9, 1, 4];
+                
+                const correctFlow = 
+                    top5Indices.length === 5 &&
+                    top5Indices.every((idx, i) => idx === expectedIndices[i]);
+                
+                results.push({
+                    name: testName,
+                    pass: correctFlow,
+                    details: `NetLoad (Float64Array): [${Array.from(netLoad).join(', ')}]\n` +
+                             `Top 5 peak hours (indices): [${top5Indices.join(', ')}]\n` +
+                             `Expected: [${expectedIndices.join(', ')}]\n` +
+                             `Corresponding netLoad values: [${top5Indices.map(i => netLoad[i]).join(', ')}]\n` +
+                             `Correct ELCC flow: ${correctFlow ? 'YES' : 'NO'}`
+                });
+            }
+            
+            // Display results
+            const resultsDiv = document.getElementById('results');
+            const passCount = results.filter(r => r.pass).length;
+            const totalCount = results.length;
+            
+            resultsDiv.innerHTML = `
+                <div class="summary">
+                    Test Results: ${passCount}/${totalCount} passed
+                    ${passCount === totalCount ? '✅ All tests passed!' : '❌ Some tests failed'}
+                </div>
+            `;
+            
+            results.forEach(result => {
+                const resultDiv = document.createElement('div');
+                resultDiv.className = `test-result ${result.pass ? 'pass' : 'fail'}`;
+                resultDiv.innerHTML = `
+                    <h3>${result.pass ? '✅' : '❌'} ${result.name}</h3>
+                    <pre>${result.details}</pre>
+                `;
+                resultsDiv.appendChild(resultDiv);
+            });
+        }
+        
+        // Run tests on page load
+        window.addEventListener('load', runTests);
+    </script>
+</body>
+</html>

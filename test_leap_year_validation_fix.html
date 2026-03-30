@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Leap Year Validation Fix Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f0f0f0;
+        }
+        .test-result {
+            background-color: white;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+            border-left: 5px solid #ccc;
+        }
+        .test-result.pass {
+            border-left-color: #4caf50;
+        }
+        .test-result.fail {
+            border-left-color: #f44336;
+        }
+        pre {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border-radius: 3px;
+            overflow-x: auto;
+            font-size: 11px;
+        }
+        .summary {
+            background-color: #e3f2fd;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>Leap Year Validation Fix - Test Suite</h1>
+    <p>This test validates the fixes to <code>extractHistoricalPricesByYear()</code> function for leap year handling.</p>
+    <p><strong>Expected Behavior:</strong> Accept leap years with either 8760 OR 8784 hours</p>
+    
+    <div id="results"></div>
+    
+    <script>
+        /**
+         * Check if a year is a leap year
+         */
+        function isLeapYear(year) {
+            return (year % 4 === 0 && year % 100 !== 0) || (year % 400 === 0);
+        }
+        
+        /**
+         * Mock implementation of extractHistoricalPricesByYear with the fix
+         */
+        function extractHistoricalPricesByYear(targetYear, yearData) {
+            // Handle leap year validation - accept both 8760 and 8784 hours for leap years
+            if (isLeapYear(targetYear)) {
+                if (yearData.length === 8784) {
+                    // Has Feb 29, remove it (hours 1416-1439)
+                    const leapDayStartHour = 1416;
+                    const leapDayEndHour = 1440;
+                    const adjustedData = [
+                        ...yearData.slice(0, leapDayStartHour),    // Jan 1 - Feb 28
+                        ...yearData.slice(leapDayEndHour)          // Mar 1 - Dec 31
+                    ];
+                    return new Float64Array(adjustedData);
+                } else if (yearData.length === 8760) {
+                    // Feb 29 already removed, use as-is
+                    return new Float64Array(yearData);
+                } else {
+                    console.warn(`Incomplete historical data for year ${targetYear}: found ${yearData.length} hours, expected 8760 or 8784`);
+                    return null;
+                }
+            } else {
+                // Non-leap year: expect exactly 8760 hours
+                if (yearData.length === 8760) {
+                    return new Float64Array(yearData);
+                } else {
+                    console.warn(`Incomplete historical data for year ${targetYear}: found ${yearData.length} hours, expected 8760`);
+                    return null;
+                }
+            }
+        }
+        
+        /**
+         * Test runner
+         */
+        const results = [];
+        
+        function runTest(name, testFn) {
+            try {
+                const result = testFn();
+                results.push({
+                    name: name,
+                    pass: result.pass,
+                    message: result.message,
+                    details: result.details
+                });
+            } catch (error) {
+                results.push({
+                    name: name,
+                    pass: false,
+                    message: 'Test threw an exception',
+                    details: error.toString()
+                });
+            }
+        }
+        
+        // Test 1: Leap year with 8760 hours (Feb 29 already removed)
+        runTest('Leap year (2024) with 8760 hours', () => {
+            const yearData = new Array(8760).fill(42.5);
+            const result = extractHistoricalPricesByYear(2024, yearData);
+            
+            const pass = result !== null && result.length === 8760;
+            return {
+                pass: pass,
+                message: pass ? '✅ Accepted 8760 hours for leap year 2024' : '❌ Failed to accept 8760 hours for leap year',
+                details: `Input: 8760 hours\nOutput: ${result ? result.length : 'null'} hours\nExpected: 8760 hours`
+            };
+        });
+        
+        // Test 2: Leap year with 8784 hours (Feb 29 included)
+        runTest('Leap year (2024) with 8784 hours', () => {
+            const yearData = new Array(8784).fill(42.5);
+            const result = extractHistoricalPricesByYear(2024, yearData);
+            
+            const pass = result !== null && result.length === 8760;
+            return {
+                pass: pass,
+                message: pass ? '✅ Accepted 8784 hours and returned 8760 hours (Feb 29 removed)' : '❌ Failed to process 8784 hours correctly',
+                details: `Input: 8784 hours\nOutput: ${result ? result.length : 'null'} hours\nExpected: 8760 hours (with Feb 29 removed)`
+            };
+        });
+        
+        // Test 3: Leap year with incomplete data (should reject)
+        runTest('Leap year (2024) with 8000 hours (incomplete)', () => {
+            const yearData = new Array(8000).fill(42.5);
+            const result = extractHistoricalPricesByYear(2024, yearData);
+            
+            const pass = result === null;
+            return {
+                pass: pass,
+                message: pass ? '✅ Correctly rejected incomplete leap year data' : '❌ Should reject incomplete data',
+                details: `Input: 8000 hours\nOutput: ${result ? result.length : 'null'}\nExpected: null (rejected)`
+            };
+        });
+        
+        // Test 4: Non-leap year with 8760 hours
+        runTest('Non-leap year (2023) with 8760 hours', () => {
+            const yearData = new Array(8760).fill(42.5);
+            const result = extractHistoricalPricesByYear(2023, yearData);
+            
+            const pass = result !== null && result.length === 8760;
+            return {
+                pass: pass,
+                message: pass ? '✅ Accepted 8760 hours for non-leap year' : '❌ Failed to accept 8760 hours',
+                details: `Input: 8760 hours\nOutput: ${result ? result.length : 'null'} hours\nExpected: 8760 hours`
+            };
+        });
+        
+        // Test 5: Non-leap year with incomplete data (should reject)
+        runTest('Non-leap year (2023) with 8000 hours (incomplete)', () => {
+            const yearData = new Array(8000).fill(42.5);
+            const result = extractHistoricalPricesByYear(2023, yearData);
+            
+            const pass = result === null;
+            return {
+                pass: pass,
+                message: pass ? '✅ Correctly rejected incomplete non-leap year data' : '❌ Should reject incomplete data',
+                details: `Input: 8000 hours\nOutput: ${result ? result.length : 'null'}\nExpected: null (rejected)`
+            };
+        });
+        
+        // Test 6: Verify Feb 29 removal from 8784 hours
+        runTest('Feb 29 removal verification (2024)', () => {
+            // Create data where Feb 29 has unique values (hours 1416-1439)
+            const yearData = new Array(8784).fill(0).map((_, i) => {
+                if (i >= 1416 && i < 1440) {
+                    return -999; // Mark Feb 29 hours with negative value
+                }
+                return i + 1; // Use hour index + 1 as value
+            });
+            
+            const result = extractHistoricalPricesByYear(2024, yearData);
+            
+            // Check that Feb 29 hours (-999) are removed
+            const hasFeb29Values = Array.from(result).some(v => v === -999);
+            const pass = !hasFeb29Values && result.length === 8760;
+            
+            return {
+                pass: pass,
+                message: pass ? '✅ Feb 29 hours correctly removed from 8784-hour data' : '❌ Feb 29 hours not properly removed',
+                details: `Input: 8784 hours (Feb 29 marked with value -999)\nOutput: ${result.length} hours\nContains Feb 29 values: ${hasFeb29Values}\nExpected: 8760 hours without Feb 29`
+            };
+        });
+        
+        // Test 7: Another leap year - 2020
+        runTest('Leap year (2020) with 8760 hours', () => {
+            const yearData = new Array(8760).fill(42.5);
+            const result = extractHistoricalPricesByYear(2020, yearData);
+            
+            const pass = result !== null && result.length === 8760;
+            return {
+                pass: pass,
+                message: pass ? '✅ Accepted 8760 hours for leap year 2020' : '❌ Failed to accept 8760 hours',
+                details: `Input: 8760 hours\nOutput: ${result ? result.length : 'null'} hours\nExpected: 8760 hours`
+            };
+        });
+        
+        // Test 8: Century leap year - 2000
+        runTest('Century leap year (2000) with 8784 hours', () => {
+            const yearData = new Array(8784).fill(42.5);
+            const result = extractHistoricalPricesByYear(2000, yearData);
+            
+            const pass = result !== null && result.length === 8760;
+            return {
+                pass: pass,
+                message: pass ? '✅ Accepted 8784 hours for century leap year 2000' : '❌ Failed to process century leap year',
+                details: `Input: 8784 hours\nOutput: ${result ? result.length : 'null'} hours\nExpected: 8760 hours (Feb 29 removed)`
+            };
+        });
+        
+        // Display results
+        function displayResults() {
+            const container = document.getElementById('results');
+            
+            const passed = results.filter(r => r.pass).length;
+            const total = results.length;
+            
+            const summaryHTML = `
+                <div class="summary">
+                    <h2>Summary</h2>
+                    <p>Passed: ${passed} / ${total}</p>
+                    <p>Status: ${passed === total ? '✅ ALL TESTS PASSED' : '❌ SOME TESTS FAILED'}</p>
+                </div>
+            `;
+            
+            const testsHTML = results.map(r => `
+                <div class="test-result ${r.pass ? 'pass' : 'fail'}">
+                    <h3>${r.name}</h3>
+                    <p><strong>${r.message}</strong></p>
+                    <pre>${r.details}</pre>
+                </div>
+            `).join('');
+            
+            container.innerHTML = summaryHTML + testsHTML;
+        }
+        
+        // Run all tests
+        displayResults();
+    </script>
+</body>
+</html>

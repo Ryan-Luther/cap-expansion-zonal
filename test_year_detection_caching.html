@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Year Detection Caching</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        .test-section {
+            border: 1px solid #ccc;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 5px;
+        }
+        .pass { color: green; font-weight: bold; }
+        .fail { color: red; font-weight: bold; }
+        .info { color: blue; }
+        h2 { color: #333; }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            cursor: pointer;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        #console-output {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Year Detection Caching Test</h1>
+    
+    <div class="test-section">
+        <h2>Test Setup</h2>
+        <p>This test validates the caching mechanism for <code>detectCompleteHistoricalYears</code>.</p>
+        <ul>
+            <li>Creates mock historical data with timestamps</li>
+            <li>Calls the function multiple times with the same data</li>
+            <li>Verifies that caching prevents redundant processing</li>
+            <li>Tests cache invalidation when data changes</li>
+        </ul>
+    </div>
+    
+    <div class="test-section">
+        <h2>Controls</h2>
+        <button onclick="runTests()">Run All Tests</button>
+        <button onclick="clearConsole()">Clear Console</button>
+    </div>
+    
+    <div class="test-section">
+        <h2>Console Output</h2>
+        <div id="console-output"></div>
+    </div>
+    
+    <div class="test-section">
+        <h2>Test Results</h2>
+        <div id="results"></div>
+    </div>
+
+    <script>
+        // Mock the cache variables and functions from the main application
+        let cachedYearDetectionResults = null;
+        let cachedDataSignature = null;
+        let consoleOutput = [];
+        
+        // Override console.log to capture output
+        const originalLog = console.log;
+        const originalError = console.error;
+        const originalWarn = console.warn;
+        
+        console.log = function(...args) {
+            consoleOutput.push({ type: 'log', message: args.join(' ') });
+            updateConsoleOutput();
+            originalLog.apply(console, args);
+        };
+        
+        console.error = function(...args) {
+            consoleOutput.push({ type: 'error', message: args.join(' ') });
+            updateConsoleOutput();
+            originalError.apply(console, args);
+        };
+        
+        console.warn = function(...args) {
+            consoleOutput.push({ type: 'warn', message: args.join(' ') });
+            updateConsoleOutput();
+            originalWarn.apply(console, args);
+        };
+        
+        function updateConsoleOutput() {
+            const outputDiv = document.getElementById('console-output');
+            outputDiv.innerHTML = consoleOutput.map(item => {
+                const color = item.type === 'error' ? 'red' : item.type === 'warn' ? 'orange' : 'black';
+                return `<div style="color: ${color};">${item.message}</div>`;
+            }).join('');
+            outputDiv.scrollTop = outputDiv.scrollHeight;
+        }
+        
+        function clearConsole() {
+            consoleOutput = [];
+            updateConsoleOutput();
+        }
+        
+        // Helper function to check if a year is a leap year
+        function isLeapYear(year) {
+            return (year % 4 === 0 && year % 100 !== 0) || (year % 400 === 0);
+        }
+        
+        // Simplified version of detectCompleteHistoricalYears with caching
+        function detectCompleteHistoricalYears(historicalData) {
+            if (!historicalData || historicalData.length === 0) {
+                console.error('detectCompleteHistoricalYears: No data provided');
+                return null;
+            }
+            
+            // Create a signature for this dataset (row count + first timestamp)
+            const firstRow = historicalData[0];
+            const dataSignature = `${historicalData.length}_${firstRow?.Snapshots || firstRow?.Date || firstRow?.DateTime || firstRow?.Timestamp || ''}`;
+            
+            // Return cached results if we've already processed this exact dataset
+            if (cachedDataSignature === dataSignature && cachedYearDetectionResults) {
+                console.log('✓ Using cached year detection results');
+                return cachedYearDetectionResults;
+            }
+            
+            console.log('=== Detecting Complete Historical Years ===');
+            console.log(`Total rows in historical data: ${historicalData.length}`);
+            
+            // Simplified detection logic for testing
+            const years = {};
+            for (const row of historicalData) {
+                if (row.Date) {
+                    const yearMatch = row.Date.match(/\b(20\d{2})\b/);
+                    if (yearMatch) {
+                        const year = parseInt(yearMatch[1]);
+                        years[year] = (years[year] || 0) + 1;
+                    }
+                }
+            }
+            
+            const completeYears = [];
+            for (const [year, count] of Object.entries(years)) {
+                const yearNum = parseInt(year);
+                const expectedHours = isLeapYear(yearNum) ? 8784 : 8760;
+                if (count >= expectedHours - 100 && count <= expectedHours + 100) {
+                    completeYears.push({
+                        year: yearNum,
+                        actualHours: count,
+                        expectedHours: expectedHours,
+                        isLeap: isLeapYear(yearNum)
+                    });
+                    console.log(`✓ Year ${year}: ${count} hours (complete)`);
+                }
+            }
+            
+            const result = {
+                completeYears: completeYears,
+                startYear: completeYears[0]?.year,
+                endYear: completeYears[completeYears.length - 1]?.year,
+                totalHours: completeYears.length * 8760,
+                numLeapYears: completeYears.filter(y => y.isLeap).length,
+                method: 'date_parsing'
+            };
+            
+            // Cache the results before returning
+            cachedDataSignature = dataSignature;
+            cachedYearDetectionResults = result;
+            
+            return result;
+        }
+        
+        // Generate mock historical data
+        function generateMockData(year, numHours = 8760) {
+            const data = [];
+            for (let i = 0; i < numHours; i++) {
+                data.push({
+                    Date: `${year}-01-01 ${String(i % 24).padStart(2, '0')}:00:00`,
+                    Price: Math.random() * 100
+                });
+            }
+            return data;
+        }
+        
+        // Test functions
+        function test1_FirstCallProcessesData() {
+            console.log('\n--- Test 1: First call should process data ---');
+            clearCache();
+            const data = generateMockData(2024, 8760);
+            const result = detectCompleteHistoricalYears(data);
+            
+            const messageFound = consoleOutput.some(item => 
+                item.message.includes('=== Detecting Complete Historical Years ===')
+            );
+            
+            return {
+                name: 'Test 1: First call processes data',
+                passed: messageFound && result !== null,
+                message: messageFound ? 'Data was processed correctly' : 'Expected processing message not found'
+            };
+        }
+        
+        function test2_SecondCallUsesCache() {
+            console.log('\n--- Test 2: Second call should use cache ---');
+            const data = generateMockData(2024, 8760);
+            
+            // Clear console to check for cache message
+            const beforeCount = consoleOutput.length;
+            const result = detectCompleteHistoricalYears(data);
+            
+            const cacheMessageFound = consoleOutput.slice(beforeCount).some(item => 
+                item.message.includes('Using cached year detection results')
+            );
+            
+            const processingMessageFound = consoleOutput.slice(beforeCount).some(item => 
+                item.message.includes('=== Detecting Complete Historical Years ===')
+            );
+            
+            return {
+                name: 'Test 2: Second call uses cache',
+                passed: cacheMessageFound && !processingMessageFound,
+                message: cacheMessageFound ? 'Cache was used correctly' : 'Cache was not used (data was reprocessed)'
+            };
+        }
+        
+        function test3_CacheInvalidatesOnNewData() {
+            console.log('\n--- Test 3: Cache should invalidate with new data ---');
+            clearCache();
+            
+            // First call with 2024 data
+            const data2024 = generateMockData(2024, 8760);
+            detectCompleteHistoricalYears(data2024);
+            
+            // Second call with different data (2025)
+            const beforeCount = consoleOutput.length;
+            const data2025 = generateMockData(2025, 8760);
+            const result = detectCompleteHistoricalYears(data2025);
+            
+            const processingMessageFound = consoleOutput.slice(beforeCount).some(item => 
+                item.message.includes('=== Detecting Complete Historical Years ===')
+            );
+            
+            return {
+                name: 'Test 3: Cache invalidates on new data',
+                passed: processingMessageFound && result !== null,
+                message: processingMessageFound ? 'Cache was invalidated and data reprocessed' : 'Cache was incorrectly reused'
+            };
+        }
+        
+        function test4_MultipleCalls() {
+            console.log('\n--- Test 4: Multiple calls with same data should use cache ---');
+            clearCache();
+            
+            const data = generateMockData(2024, 8760);
+            
+            // First call
+            detectCompleteHistoricalYears(data);
+            
+            // Multiple subsequent calls
+            let allUsedCache = true;
+            for (let i = 0; i < 5; i++) {
+                const beforeCount = consoleOutput.length;
+                detectCompleteHistoricalYears(data);
+                
+                const cacheUsed = consoleOutput.slice(beforeCount).some(item => 
+                    item.message.includes('Using cached year detection results')
+                );
+                
+                if (!cacheUsed) {
+                    allUsedCache = false;
+                    break;
+                }
+            }
+            
+            return {
+                name: 'Test 4: Multiple calls use cache',
+                passed: allUsedCache,
+                message: allUsedCache ? 'All 5 calls used cache' : 'Some calls did not use cache'
+            };
+        }
+        
+        function clearCache() {
+            cachedYearDetectionResults = null;
+            cachedDataSignature = null;
+        }
+        
+        function runTests() {
+            clearConsole();
+            console.log('Starting test suite...\n');
+            
+            const tests = [
+                test1_FirstCallProcessesData,
+                test2_SecondCallUsesCache,
+                test3_CacheInvalidatesOnNewData,
+                test4_MultipleCalls
+            ];
+            
+            const results = tests.map(test => test());
+            
+            // Display results
+            const resultsDiv = document.getElementById('results');
+            let html = '<ul>';
+            let passCount = 0;
+            
+            results.forEach(result => {
+                const status = result.passed ? '<span class="pass">✓ PASS</span>' : '<span class="fail">✗ FAIL</span>';
+                html += `<li>${status} - ${result.name}: ${result.message}</li>`;
+                if (result.passed) passCount++;
+            });
+            
+            html += '</ul>';
+            html += `<p><strong>Summary: ${passCount}/${results.length} tests passed</strong></p>`;
+            
+            resultsDiv.innerHTML = html;
+            
+            console.log(`\n=== Test Summary ===`);
+            console.log(`${passCount}/${results.length} tests passed`);
+            
+            if (passCount === results.length) {
+                console.log('✓ All tests passed!');
+            } else {
+                console.log('✗ Some tests failed');
+            }
+        }
+    </script>
+</body>
+</html>

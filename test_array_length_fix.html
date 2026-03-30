@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Array Length Fix Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f0f0f0;
+        }
+        .test-result {
+            background-color: white;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+            border-left: 5px solid #ccc;
+        }
+        .test-result.pass {
+            border-left-color: #4caf50;
+        }
+        .test-result.fail {
+            border-left-color: #f44336;
+        }
+        pre {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border-radius: 3px;
+            overflow-x: auto;
+            font-size: 11px;
+        }
+        .summary {
+            background-color: #e3f2fd;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>Array Length Mismatch Fix - Test Suite</h1>
+    <p>This test validates the new helper functions for handling array length mismatches in auto-calibration.</p>
+    
+    <div id="results"></div>
+    
+    <script>
+        // ========== Helper Functions (copy from main file) ==========
+        
+        function detectCompleteHistoricalYears(historicalData) {
+            if (!historicalData || historicalData.length === 0) {
+                console.error('detectCompleteHistoricalYears: No data provided');
+                return null;
+            }
+            
+            console.log('=== Detecting Complete Historical Years ===');
+            console.log(`Total rows in historical data: ${historicalData.length}`);
+            
+            // Try to find date/year columns
+            const firstRow = historicalData[0];
+            const columns = Object.keys(firstRow);
+            
+            let dateColumn = null;
+            let yearColumn = null;
+            
+            // Look for date or year column
+            for (const col of columns) {
+                const colLower = col.toLowerCase();
+                if (colLower.includes('date') || colLower.includes('datetime')) {
+                    dateColumn = col;
+                    break;
+                }
+                if (colLower.includes('year')) {
+                    yearColumn = col;
+                }
+            }
+            
+            if (!dateColumn && !yearColumn) {
+                console.warn('No date or year column found, assuming data is continuous from first to last row');
+                // Assume 8760 hours per year
+                const numYears = Math.floor(historicalData.length / 8760);
+                const completeHours = numYears * 8760;
+                
+                console.log(`Detected ${numYears} complete year(s) based on row count`);
+                console.log(`Will use first ${completeHours} hours`);
+                
+                return {
+                    completeYears: Array.from({length: numYears}, (_, i) => 2020 + i),
+                    startYear: 2020,
+                    endYear: 2020 + numYears - 1,
+                    totalHours: completeHours,
+                    method: 'row_count'
+                };
+            }
+            
+            // Parse years from date column
+            const years = new Set();
+            const yearCounts = {};
+            
+            for (const row of historicalData) {
+                let year = null;
+                
+                if (dateColumn && row[dateColumn]) {
+                    const dateStr = row[dateColumn].toString();
+                    // Try to extract year (YYYY)
+                    const yearMatch = dateStr.match(/\b(20\d{2})\b/);
+                    if (yearMatch) {
+                        year = parseInt(yearMatch[1]);
+                    }
+                } else if (yearColumn && row[yearColumn]) {
+                    year = parseInt(row[yearColumn]);
+                }
+                
+                if (year && year >= 2000 && year <= 2100) {
+                    years.add(year);
+                    yearCounts[year] = (yearCounts[year] || 0) + 1;
+                }
+            }
+            
+            if (years.size === 0) {
+                console.error('Could not detect any years from data');
+                return null;
+            }
+            
+            const sortedYears = Array.from(years).sort((a, b) => a - b);
+            console.log('Years found in data:', sortedYears);
+            console.log('Hours per year:', yearCounts);
+            
+            // Determine which years are complete (have close to 8760 hours)
+            const completeYears = [];
+            for (const year of sortedYears) {
+                const hours = yearCounts[year];
+                // Consider complete if >= 8700 hours (allows for small data gaps)
+                if (hours >= 8700) {
+                    completeYears.push(year);
+                    console.log(`✓ Year ${year}: ${hours} hours (complete)`);
+                } else {
+                    console.log(`✗ Year ${year}: ${hours} hours (partial, excluding)`);
+                }
+            }
+            
+            if (completeYears.length === 0) {
+                console.error('No complete years found in historical data');
+                return null;
+            }
+            
+            const totalHours = completeYears.length * 8760;
+            
+            console.log(`Using ${completeYears.length} complete year(s): ${completeYears.join(', ')}`);
+            console.log(`Total hours for calibration: ${totalHours}`);
+            
+            return {
+                completeYears: completeYears,
+                startYear: completeYears[0],
+                endYear: completeYears[completeYears.length - 1],
+                totalHours: totalHours,
+                method: 'date_parsing'
+            };
+        }
+        
+        function tileSimulatedData(data, targetLength) {
+            if (!data || data.length === 0) {
+                console.error('tileSimulatedData: No data provided');
+                return null;
+            }
+            
+            const yearLength = data.length;
+            const numRepeats = Math.ceil(targetLength / yearLength);
+            
+            console.log(`Tiling simulated data: ${yearLength} hours × ${numRepeats} repetitions = ${yearLength * numRepeats} hours`);
+            
+            const tiledData = [];
+            for (let i = 0; i < numRepeats; i++) {
+                tiledData.push(...data);
+            }
+            
+            // Truncate to exact target length
+            return tiledData.slice(0, targetLength);
+        }
+        
+        // ========== Test Functions ==========
+        
+        function testDetectCompleteYears_WithRowCount() {
+            console.log('\n=== Test: Detect Complete Years (Row Count) ===');
+            
+            // Create test data with 2 complete years (no date column)
+            const testData = Array.from({length: 17520}, (_, i) => ({
+                price: 50 + Math.random() * 50,
+                value: i
+            }));
+            
+            const result = detectCompleteHistoricalYears(testData);
+            
+            const pass = result && 
+                         result.totalHours === 17520 && 
+                         result.completeYears.length === 2 &&
+                         result.method === 'row_count';
+            
+            return {
+                name: 'Detect Complete Years (Row Count)',
+                status: pass ? 'pass' : 'fail',
+                message: pass ? 'Correctly detected 2 complete years from 17,520 rows' : 'Failed to detect years',
+                details: JSON.stringify(result, null, 2)
+            };
+        }
+        
+        function testDetectCompleteYears_WithDateColumn() {
+            console.log('\n=== Test: Detect Complete Years (Date Column) ===');
+            
+            // Create test data with date column spanning 2020-2022 with partial 2023
+            const testData = [];
+            
+            // 2020: 8760 hours
+            for (let i = 0; i < 8760; i++) {
+                testData.push({ datetime: `2020-01-01 ${i}:00`, price: 50 });
+            }
+            
+            // 2021: 8760 hours
+            for (let i = 0; i < 8760; i++) {
+                testData.push({ datetime: `2021-01-01 ${i}:00`, price: 50 });
+            }
+            
+            // 2022: 8760 hours
+            for (let i = 0; i < 8760; i++) {
+                testData.push({ datetime: `2022-01-01 ${i}:00`, price: 50 });
+            }
+            
+            // 2023: partial (4000 hours)
+            for (let i = 0; i < 4000; i++) {
+                testData.push({ datetime: `2023-01-01 ${i}:00`, price: 50 });
+            }
+            
+            const result = detectCompleteHistoricalYears(testData);
+            
+            const pass = result && 
+                         result.totalHours === 26280 && // 3 complete years
+                         result.completeYears.length === 3 &&
+                         result.startYear === 2020 &&
+                         result.endYear === 2022 &&
+                         result.method === 'date_parsing';
+            
+            return {
+                name: 'Detect Complete Years (Date Column)',
+                status: pass ? 'pass' : 'fail',
+                message: pass ? 'Correctly detected 3 complete years (2020-2022) and excluded partial 2023' : 'Failed to detect years',
+                details: JSON.stringify(result, null, 2)
+            };
+        }
+        
+        function testTileSimulatedData() {
+            console.log('\n=== Test: Tile Simulated Data ===');
+            
+            // Create simulated data for 1 year (8760 hours)
+            const simulatedData = Array.from({length: 8760}, (_, i) => i);
+            
+            // Tile to 3 years
+            const tiledData = tileSimulatedData(simulatedData, 26280);
+            
+            const pass = tiledData && 
+                         tiledData.length === 26280 &&
+                         tiledData[0] === 0 &&
+                         tiledData[8760] === 0 && // Second year starts at same value
+                         tiledData[17520] === 0 && // Third year starts at same value
+                         tiledData[8759] === 8759 &&
+                         tiledData[17519] === 8759;
+            
+            return {
+                name: 'Tile Simulated Data',
+                status: pass ? 'pass' : 'fail',
+                message: pass ? 'Correctly tiled 8,760 hours to 26,280 hours (3 years)' : 'Failed to tile data',
+                details: `Original length: 8760\nTiled length: ${tiledData?.length}\nFirst values: [${tiledData?.slice(0, 5).join(', ')}]\nSecond year start: [${tiledData?.slice(8760, 8765).join(', ')}]`
+            };
+        }
+        
+        function testArrayLengthHandling() {
+            console.log('\n=== Test: Array Length Handling ===');
+            
+            // Simulate the scenario: 1 year simulated, 2 years historical
+            const simulatedRM = Array.from({length: 8760}, () => 0.15);
+            const rawPrices = Array.from({length: 8760}, () => 50);
+            const gasPrices = Array.from({length: 8760}, () => 5);
+            const historicalPrices = Array.from({length: 17520}, () => 52);
+            
+            // Apply tiling logic
+            let finalSimulatedRM = simulatedRM;
+            let finalRawPrices = rawPrices;
+            let finalGasPrices = gasPrices;
+            
+            if (historicalPrices.length > rawPrices.length) {
+                finalSimulatedRM = tileSimulatedData(simulatedRM, historicalPrices.length);
+                finalRawPrices = tileSimulatedData(rawPrices, historicalPrices.length);
+                finalGasPrices = tileSimulatedData(gasPrices, historicalPrices.length);
+            }
+            
+            const pass = finalSimulatedRM.length === historicalPrices.length &&
+                         finalRawPrices.length === historicalPrices.length &&
+                         finalGasPrices.length === historicalPrices.length &&
+                         finalSimulatedRM.length === 17520;
+            
+            return {
+                name: 'Array Length Handling',
+                status: pass ? 'pass' : 'fail',
+                message: pass ? 'All arrays correctly matched to historical length (17,520)' : 'Arrays not properly aligned',
+                details: `Simulated: ${finalSimulatedRM.length}\nRaw Prices: ${finalRawPrices.length}\nGas Prices: ${finalGasPrices.length}\nHistorical: ${historicalPrices.length}`
+            };
+        }
+        
+        // ========== Run Tests ==========
+        
+        function runAllTests() {
+            const results = [];
+            
+            results.push(testDetectCompleteYears_WithRowCount());
+            results.push(testDetectCompleteYears_WithDateColumn());
+            results.push(testTileSimulatedData());
+            results.push(testArrayLengthHandling());
+            
+            displayResults(results);
+        }
+        
+        function displayResults(results) {
+            const resultsDiv = document.getElementById('results');
+            
+            const passCount = results.filter(r => r.status === 'pass').length;
+            const failCount = results.filter(r => r.status === 'fail').length;
+            
+            let html = `<div class="summary">
+                <h2>Test Summary</h2>
+                <p>Passed: ${passCount} / ${results.length}</p>
+                <p>Failed: ${failCount} / ${results.length}</p>
+            </div>`;
+            
+            for (const result of results) {
+                html += `<div class="test-result ${result.status}">
+                    <h3>${result.name}</h3>
+                    <p><strong>${result.status.toUpperCase()}</strong>: ${result.message}</p>
+                    <pre>${result.details}</pre>
+                </div>`;
+            }
+            
+            resultsDiv.innerHTML = html;
+        }
+        
+        // Run tests on page load
+        window.addEventListener('DOMContentLoaded', runAllTests);
+    </script>
+</body>
+</html>

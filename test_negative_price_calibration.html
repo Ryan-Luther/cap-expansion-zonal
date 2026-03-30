@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Negative Price Calibration Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f0f0f0;
+        }
+        .test-result {
+            background-color: white;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+            border-left: 5px solid #ccc;
+        }
+        .test-result.pass {
+            border-left-color: #4caf50;
+        }
+        .test-result.fail {
+            border-left-color: #f44336;
+        }
+        pre {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border-radius: 3px;
+            overflow-x: auto;
+            font-size: 11px;
+        }
+        .summary {
+            background-color: #e3f2fd;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>Negative Price Calibration Test</h1>
+    <p>This test validates that the calibration logic now includes negative prices in the average calculation.</p>
+    
+    <div id="results"></div>
+    
+    <script>
+        const PRICE_CAP = 5000;
+        let historicalAvgPrice = null;
+        
+        // Simulated ppConfig object
+        const ppConfig = {
+            heatRates: {
+                Winter: { pk: 7.0, op: 8.0 },
+                Summer: { pk: 7.5, op: 8.5 },
+                Shoulder: { pk: 7.2, op: 8.2 }
+            },
+            volatility: {
+                Winter: [0, 0, 0, 0],
+                Summer: [0, 0, 0, 0],
+                Shoulder: [0, 0, 0, 0]
+            }
+        };
+        
+        // Simulated calibrateFromParsedData function (with the fix)
+        function calibrateFromParsedData(parsed) {
+            if (parsed.length === 0) return false;
+
+            const stats = { Winter: {pkS:0, pkC:0, opS:0, opC:0}, Summer: {pkS:0, pkC:0, opS:0, opC:0}, Shoulder: {pkS:0, pkC:0, opS:0, opC:0} };
+            parsed.forEach(r => { 
+                const g = r.g > 0.1 ? r.g : 3.5; 
+                const mhr = r.p / g; 
+                const s = stats[r.season]; 
+                if(r.isPeak) { s.pkS += mhr; s.pkC++; } else { s.opS += mhr; s.opC++; } 
+            });
+
+            ['Winter', 'Summer', 'Shoulder'].forEach(s => {
+                if(stats[s].pkC > 0) ppConfig.heatRates[s].pk = parseFloat((stats[s].pkS / stats[s].pkC).toFixed(1));
+                if(stats[s].opC > 0) ppConfig.heatRates[s].op = parseFloat((stats[s].opS / stats[s].opC).toFixed(1));
+            });
+            
+            // Calculate and store the historical average power price for base year calibration
+            // FIXED: Now includes negative prices (r.p > -500 instead of r.p > 0)
+            const validPrices = parsed.filter(r => r.p > -500 && r.p < PRICE_CAP); // Exclude extreme outliers, include negative prices
+            if (validPrices.length > 0) {
+                historicalAvgPrice = validPrices.reduce((sum, r) => sum + r.p, 0) / validPrices.length;
+            }
+            
+            return true;
+        }
+        
+        // Test cases
+        function runTests() {
+            const resultsDiv = document.getElementById('results');
+            let html = '';
+            let passCount = 0;
+            let totalTests = 0;
+            
+            // Test 1: Verify negative prices are included
+            totalTests++;
+            const testData1 = [
+                { idx: 0, p: 50, g: 4.0, season: 'Summer', isPeak: true },
+                { idx: 1, p: -10, g: 4.0, season: 'Summer', isPeak: false },
+                { idx: 2, p: 30, g: 4.0, season: 'Summer', isPeak: false },
+                { idx: 3, p: -5, g: 4.0, season: 'Summer', isPeak: false }
+            ];
+            
+            historicalAvgPrice = null;
+            calibrateFromParsedData(testData1);
+            
+            // Expected average: (50 + (-10) + 30 + (-5)) / 4 = 65 / 4 = 16.25
+            const expectedAvg1 = 16.25;
+            const test1Pass = Math.abs(historicalAvgPrice - expectedAvg1) < 0.01;
+            
+            html += `<div class="test-result ${test1Pass ? 'pass' : 'fail'}">
+                <strong>Test 1: Include Negative Prices</strong>
+                <pre>Input: [50, -10, 30, -5]
+Expected Average: ${expectedAvg1}
+Actual Average: ${historicalAvgPrice}
+Status: ${test1Pass ? 'PASS ✓' : 'FAIL ✗'}</pre>
+            </div>`;
+            
+            if (test1Pass) passCount++;
+            
+            // Test 2: Verify extreme negatives are still excluded
+            totalTests++;
+            const testData2 = [
+                { idx: 0, p: 100, g: 4.0, season: 'Winter', isPeak: true },
+                { idx: 1, p: -600, g: 4.0, season: 'Winter', isPeak: false }, // Should be excluded
+                { idx: 2, p: 50, g: 4.0, season: 'Winter', isPeak: false },
+                { idx: 3, p: -200, g: 4.0, season: 'Winter', isPeak: false }
+            ];
+            
+            historicalAvgPrice = null;
+            calibrateFromParsedData(testData2);
+            
+            // Expected average: (100 + 50 + (-200)) / 3 = -50 / 3 = -16.67 (excludes -600)
+            const expectedAvg2 = -50 / 3;
+            const test2Pass = Math.abs(historicalAvgPrice - expectedAvg2) < 0.01;
+            
+            html += `<div class="test-result ${test2Pass ? 'pass' : 'fail'}">
+                <strong>Test 2: Exclude Extreme Negatives (< -500)</strong>
+                <pre>Input: [100, -600, 50, -200]
+Expected Average: ${expectedAvg2.toFixed(2)} (excludes -600)
+Actual Average: ${historicalAvgPrice.toFixed(2)}
+Status: ${test2Pass ? 'PASS ✓' : 'FAIL ✗'}</pre>
+            </div>`;
+            
+            if (test2Pass) passCount++;
+            
+            // Test 3: Verify high prices are still excluded
+            totalTests++;
+            const testData3 = [
+                { idx: 0, p: 100, g: 4.0, season: 'Shoulder', isPeak: true },
+                { idx: 1, p: 6000, g: 4.0, season: 'Shoulder', isPeak: false }, // Should be excluded
+                { idx: 2, p: 200, g: 4.0, season: 'Shoulder', isPeak: false },
+                { idx: 3, p: -50, g: 4.0, season: 'Shoulder', isPeak: false }
+            ];
+            
+            historicalAvgPrice = null;
+            calibrateFromParsedData(testData3);
+            
+            // Expected average: (100 + 200 + (-50)) / 3 = 250 / 3 = 83.33 (excludes 6000)
+            const expectedAvg3 = 250 / 3;
+            const test3Pass = Math.abs(historicalAvgPrice - expectedAvg3) < 0.01;
+            
+            html += `<div class="test-result ${test3Pass ? 'pass' : 'fail'}">
+                <strong>Test 3: Exclude Extreme Positives (> ${PRICE_CAP})</strong>
+                <pre>Input: [100, 6000, 200, -50]
+Expected Average: ${expectedAvg3.toFixed(2)} (excludes 6000)
+Actual Average: ${historicalAvgPrice.toFixed(2)}
+Status: ${test3Pass ? 'PASS ✓' : 'FAIL ✗'}</pre>
+            </div>`;
+            
+            if (test3Pass) passCount++;
+            
+            // Test 4: Mixed positive and negative with realistic renewable grid prices
+            totalTests++;
+            const testData4 = [
+                { idx: 0, p: 42.5, g: 4.0, season: 'Summer', isPeak: true },
+                { idx: 1, p: -15.2, g: 4.0, season: 'Summer', isPeak: false },
+                { idx: 2, p: 35.8, g: 4.0, season: 'Summer', isPeak: false },
+                { idx: 3, p: -8.3, g: 4.0, season: 'Summer', isPeak: false },
+                { idx: 4, p: 50.0, g: 4.0, season: 'Summer', isPeak: true },
+                { idx: 5, p: -20.1, g: 4.0, season: 'Summer', isPeak: false }
+            ];
+            
+            historicalAvgPrice = null;
+            calibrateFromParsedData(testData4);
+            
+            // Expected average: (42.5 + (-15.2) + 35.8 + (-8.3) + 50.0 + (-20.1)) / 6 = 84.7 / 6 = 14.12
+            const expectedAvg4 = 84.7 / 6;
+            const test4Pass = Math.abs(historicalAvgPrice - expectedAvg4) < 0.01;
+            
+            html += `<div class="test-result ${test4Pass ? 'pass' : 'fail'}">
+                <strong>Test 4: Realistic Renewable Grid Prices</strong>
+                <pre>Input: [42.5, -15.2, 35.8, -8.3, 50.0, -20.1]
+Expected Average: ${expectedAvg4.toFixed(2)}
+Actual Average: ${historicalAvgPrice.toFixed(2)}
+Status: ${test4Pass ? 'PASS ✓' : 'FAIL ✗'}
+Note: This simulates NYISO with high renewable penetration</pre>
+            </div>`;
+            
+            if (test4Pass) passCount++;
+            
+            // Test 5: Boundary test for MIN_PRICE_FILTER (-500)
+            totalTests++;
+            const testData5 = [
+                { idx: 0, p: 100, g: 4.0, season: 'Winter', isPeak: true },
+                { idx: 1, p: -500, g: 4.0, season: 'Winter', isPeak: false }, // Exactly -500, should be excluded
+                { idx: 2, p: 50, g: 4.0, season: 'Winter', isPeak: false }
+            ];
+            
+            historicalAvgPrice = null;
+            calibrateFromParsedData(testData5);
+            
+            // Expected average: (100 + 50) / 2 = 75 (excludes -500 since r.p > -500 is strict)
+            const expectedAvg5 = 75;
+            const test5Pass = Math.abs(historicalAvgPrice - expectedAvg5) < 0.01;
+            
+            html += `<div class="test-result ${test5Pass ? 'pass' : 'fail'}">
+                <strong>Test 5: Boundary Test for MIN_PRICE_FILTER (-500)</strong>
+                <pre>Input: [100, -500, 50]
+Expected Average: ${expectedAvg5.toFixed(2)} (excludes -500, boundary is exclusive)
+Actual Average: ${historicalAvgPrice.toFixed(2)}
+Status: ${test5Pass ? 'PASS ✓' : 'FAIL ✗'}
+Note: Tests r.p > -500 (strict inequality)</pre>
+            </div>`;
+            
+            if (test5Pass) passCount++;
+            
+            // Test 6: Boundary test for PRICE_CAP (5000)
+            totalTests++;
+            const testData6 = [
+                { idx: 0, p: 100, g: 4.0, season: 'Summer', isPeak: true },
+                { idx: 1, p: 5000, g: 4.0, season: 'Summer', isPeak: false }, // Exactly 5000, should be excluded
+                { idx: 2, p: 200, g: 4.0, season: 'Summer', isPeak: false }
+            ];
+            
+            historicalAvgPrice = null;
+            calibrateFromParsedData(testData6);
+            
+            // Expected average: (100 + 200) / 2 = 150 (excludes 5000 since r.p < 5000 is strict)
+            const expectedAvg6 = 150;
+            const test6Pass = Math.abs(historicalAvgPrice - expectedAvg6) < 0.01;
+            
+            html += `<div class="test-result ${test6Pass ? 'pass' : 'fail'}">
+                <strong>Test 6: Boundary Test for PRICE_CAP (5000)</strong>
+                <pre>Input: [100, 5000, 200]
+Expected Average: ${expectedAvg6.toFixed(2)} (excludes 5000, boundary is exclusive)
+Actual Average: ${historicalAvgPrice.toFixed(2)}
+Status: ${test6Pass ? 'PASS ✓' : 'FAIL ✗'}
+Note: Tests r.p < PRICE_CAP (strict inequality)</pre>
+            </div>`;
+            
+            if (test6Pass) passCount++;
+            
+            
+            // Summary
+            html += `<div class="summary">
+                Test Summary: ${passCount}/${totalTests} tests passed
+                ${passCount === totalTests ? '🎉 All tests passed!' : '⚠️ Some tests failed'}
+            </div>`;
+            
+            resultsDiv.innerHTML = html;
+        }
+        
+        // Run tests automatically on page load
+        window.addEventListener('load', runTests);
+    </script>
+</body>
+</html>

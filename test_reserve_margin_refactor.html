@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reserve Margin Refactor Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f0f0f0;
+        }
+        .test-result {
+            background-color: white;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+            border-left: 5px solid #ccc;
+        }
+        .test-result.pass {
+            border-left-color: #4caf50;
+        }
+        .test-result.fail {
+            border-left-color: #f44336;
+        }
+        h1 {
+            color: #333;
+        }
+        pre {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border-radius: 3px;
+            overflow-x: auto;
+        }
+        .summary {
+            background-color: #e3f2fd;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>Reserve Margin Refactor Test</h1>
+    <p>This test validates that the refactored calcReserveMarginForHour function correctly handles both:</p>
+    <ul>
+        <li>The static load from hourlyData when no parameter is provided (backward compatibility)</li>
+        <li>The hypothetical load parameter when provided (new functionality for storage dispatch)</li>
+    </ul>
+    
+    <div id="results"></div>
+    
+    <script>
+        function runTests() {
+            const results = [];
+            
+            // Mock data structures needed for the function
+            const hourlyData = [
+                { Load_MW: 1000 },  // hour 0
+                { Load_MW: 1200 },  // hour 1
+                { Load_MW: 800 }    // hour 2
+            ];
+            
+            const totalThermalDispatchCapacity = 1500;
+            const storageCapacity = 100;
+            const totalVariableGen = [200, 300, 150]; // hourly renewable generation
+            
+            // Define the refactored function
+            const calcReserveMarginForHour = (hourIdx, loadMW = null) => {
+                // Use provided loadMW parameter if given, otherwise fall back to hourlyData
+                const load = loadMW !== null ? loadMW : (hourlyData[hourIdx] ? hourlyData[hourIdx].Load_MW : 0);
+                
+                // Available generation = thermal dispatchable + storage capacity + pre-calculated variable generation
+                const availableGenAtHour = totalThermalDispatchCapacity + storageCapacity + totalVariableGen[hourIdx];
+                
+                // Reserve margin = ((available generation / load) - 1) as decimal
+                return load > 0 ? ((availableGenAtHour / load) - 1) : 0;
+            };
+            
+            // Test 1: Backward compatibility - no load parameter (uses hourlyData)
+            const hourIdx0 = 0;
+            const staticLoad0 = hourlyData[hourIdx0].Load_MW; // 1000 MW
+            const availableGen0 = totalThermalDispatchCapacity + storageCapacity + totalVariableGen[hourIdx0]; // 1500 + 100 + 200 = 1800 MW
+            const expectedRM0 = (availableGen0 / staticLoad0) - 1; // (1800 / 1000) - 1 = 0.8
+            const actualRM0 = calcReserveMarginForHour(hourIdx0);
+            
+            results.push({
+                name: 'Test 1: Backward Compatibility (No Load Parameter)',
+                pass: Math.abs(actualRM0 - expectedRM0) < 0.001,
+                details: `Expected RM: ${expectedRM0.toFixed(3)}, Actual RM: ${actualRM0.toFixed(3)}\nShould use static load from hourlyData (${staticLoad0} MW)`
+            });
+            
+            // Test 2: New functionality - with hypothetical load parameter (storage charging)
+            const hypotheticalLoadCharge = staticLoad0 + 100; // 1100 MW (storage adds 100 MW load when charging)
+            const expectedRMCharge = (availableGen0 / hypotheticalLoadCharge) - 1; // (1800 / 1100) - 1 ≈ 0.636
+            const actualRMCharge = calcReserveMarginForHour(hourIdx0, hypotheticalLoadCharge);
+            
+            results.push({
+                name: 'Test 2: Hypothetical Load - Storage Charging',
+                pass: Math.abs(actualRMCharge - expectedRMCharge) < 0.001,
+                details: `Expected RM: ${expectedRMCharge.toFixed(3)}, Actual RM: ${actualRMCharge.toFixed(3)}\nHypothetical load: ${hypotheticalLoadCharge} MW (storage charging increases load)\nReserve margin should decrease when load increases`
+            });
+            
+            // Test 3: New functionality - with hypothetical load parameter (storage discharging)
+            const hypotheticalLoadDischarge = staticLoad0 - 85; // 915 MW (storage reduces 85 MW load when discharging)
+            const expectedRMDischarge = (availableGen0 / hypotheticalLoadDischarge) - 1; // (1800 / 915) - 1 ≈ 0.967
+            const actualRMDischarge = calcReserveMarginForHour(hourIdx0, hypotheticalLoadDischarge);
+            
+            results.push({
+                name: 'Test 3: Hypothetical Load - Storage Discharging',
+                pass: Math.abs(actualRMDischarge - expectedRMDischarge) < 0.001,
+                details: `Expected RM: ${expectedRMDischarge.toFixed(3)}, Actual RM: ${actualRMDischarge.toFixed(3)}\nHypothetical load: ${hypotheticalLoadDischarge} MW (storage discharging reduces load)\nReserve margin should increase when load decreases`
+            });
+            
+            // Test 4: Verify reserve margin relationship
+            const rmComparison = actualRMCharge < actualRM0 && actualRM0 < actualRMDischarge;
+            results.push({
+                name: 'Test 4: Reserve Margin Ordering',
+                pass: rmComparison,
+                details: `RM(charging): ${actualRMCharge.toFixed(3)} < RM(static): ${actualRM0.toFixed(3)} < RM(discharging): ${actualRMDischarge.toFixed(3)}\nReserve margin should be lowest when charging (high load) and highest when discharging (low load)`
+            });
+            
+            // Test 5: Test with different hour (hour 1)
+            const hourIdx1 = 1;
+            const staticLoad1 = hourlyData[hourIdx1].Load_MW; // 1200 MW
+            const availableGen1 = totalThermalDispatchCapacity + storageCapacity + totalVariableGen[hourIdx1]; // 1500 + 100 + 300 = 1900 MW
+            const expectedRM1 = (availableGen1 / staticLoad1) - 1; // (1900 / 1200) - 1 ≈ 0.583
+            const actualRM1 = calcReserveMarginForHour(hourIdx1);
+            
+            results.push({
+                name: 'Test 5: Different Hour Index',
+                pass: Math.abs(actualRM1 - expectedRM1) < 0.001,
+                details: `Expected RM: ${expectedRM1.toFixed(3)}, Actual RM: ${actualRM1.toFixed(3)}\nHour 1 has higher load (${staticLoad1} MW) and more renewables (${totalVariableGen[hourIdx1]} MW)`
+            });
+            
+            // Test 6: Edge case - zero load should return 0
+            const actualRMZeroLoad = calcReserveMarginForHour(0, 0);
+            results.push({
+                name: 'Test 6: Edge Case - Zero Load',
+                pass: actualRMZeroLoad === 0,
+                details: `Expected RM: 0, Actual RM: ${actualRMZeroLoad}\nZero load should return 0 to avoid division by zero`
+            });
+            
+            // Display results
+            const resultsDiv = document.getElementById('results');
+            results.forEach(result => {
+                const div = document.createElement('div');
+                div.className = `test-result ${result.pass ? 'pass' : 'fail'}`;
+                div.innerHTML = `
+                    <h3>${result.pass ? 'PASS' : 'FAIL'}: ${result.name}</h3>
+                    <pre>${result.details}</pre>
+                `;
+                resultsDiv.appendChild(div);
+            });
+            
+            // Summary
+            const passed = results.filter(r => r.pass).length;
+            const failed = results.filter(r => !r.pass).length;
+            const summary = document.createElement('div');
+            summary.className = 'summary';
+            summary.innerHTML = `Summary: ${passed} passed, ${failed} failed out of ${results.length} tests`;
+            resultsDiv.insertBefore(summary, resultsDiv.firstChild);
+        }
+        
+        // Run tests automatically on page load
+        runTests();
+    </script>
+</body>
+</html>

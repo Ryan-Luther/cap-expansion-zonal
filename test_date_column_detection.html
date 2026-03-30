@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Date Column Detection Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f0f0f0;
+        }
+        .test-result {
+            background-color: white;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+            border-left: 5px solid #ccc;
+        }
+        .test-result.pass {
+            border-left-color: #4caf50;
+        }
+        .test-result.fail {
+            border-left-color: #f44336;
+        }
+        pre {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border-radius: 3px;
+            overflow-x: auto;
+            font-size: 11px;
+        }
+        .summary {
+            background-color: #e3f2fd;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+        .console-log {
+            background-color: #f5f5f5;
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 3px;
+            font-family: monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+        }
+    </style>
+</head>
+<body>
+    <h1>Date Column Detection - Test Suite</h1>
+    <p>This test validates the improved date column detection logic that handles:</p>
+    <ul>
+        <li>Case sensitivity ("Snapshots", "SNAPSHOTS", "snapshots")</li>
+        <li>Leading/trailing whitespace (" Snapshots", "Snapshots ")</li>
+        <li>BOM (Byte Order Mark) characters</li>
+        <li>Various date column names (Snapshots, Date, DateTime, Timestamp)</li>
+    </ul>
+    
+    <div id="results"></div>
+    
+    <script>
+        // Normalize column names: trim whitespace, remove BOM, lowercase
+        const normalizeColumnName = (col) => {
+            if (!col) return '';
+            // Remove BOM and trim
+            return col.replace(/^\uFEFF/, '').trim().toLowerCase();
+        };
+
+        // Look for date columns
+        function findDateColumn(columns) {
+            const possibleDateNames = ['snapshots', 'date', 'datetime', 'timestamp'];
+            
+            for (const col of columns) {
+                const normalized = normalizeColumnName(col);
+                if (possibleDateNames.includes(normalized) || normalized.includes('date') || normalized.includes('time')) {
+                    return col; // Use original column name
+                }
+            }
+            return null;
+        }
+
+        // Test utilities
+        const results = [];
+        let passCount = 0;
+        let failCount = 0;
+        const consoleLogs = [];
+
+        function captureLog(...args) {
+            consoleLogs.push(args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+        }
+
+        function runTest(testName, testFn) {
+            consoleLogs.length = 0;
+            const originalLog = console.log;
+            console.log = captureLog;
+            
+            try {
+                const result = testFn();
+                console.log = originalLog;
+                
+                if (result.pass) {
+                    passCount++;
+                    results.push({
+                        name: testName,
+                        pass: true,
+                        message: result.message,
+                        logs: [...consoleLogs]
+                    });
+                } else {
+                    failCount++;
+                    results.push({
+                        name: testName,
+                        pass: false,
+                        message: result.message,
+                        expected: result.expected,
+                        actual: result.actual,
+                        logs: [...consoleLogs]
+                    });
+                }
+            } catch (error) {
+                console.log = originalLog;
+                failCount++;
+                results.push({
+                    name: testName,
+                    pass: false,
+                    message: `Test threw an exception: ${error.message}`,
+                    error: error.stack,
+                    logs: [...consoleLogs]
+                });
+            }
+        }
+
+        function displayResults() {
+            const resultsDiv = document.getElementById('results');
+            
+            // Summary
+            const summary = document.createElement('div');
+            summary.className = 'summary';
+            summary.innerHTML = `
+                <div>Tests Run: ${passCount + failCount}</div>
+                <div style="color: #4caf50;">Passed: ${passCount}</div>
+                <div style="color: #f44336;">Failed: ${failCount}</div>
+            `;
+            resultsDiv.appendChild(summary);
+            
+            // Individual results
+            results.forEach(result => {
+                const resultDiv = document.createElement('div');
+                resultDiv.className = `test-result ${result.pass ? 'pass' : 'fail'}`;
+                
+                let html = `
+                    <h3>${result.pass ? '✓' : '✗'} ${result.name}</h3>
+                    <p>${result.message}</p>
+                `;
+                
+                if (!result.pass) {
+                    if (result.expected !== undefined) {
+                        html += `
+                            <p><strong>Expected:</strong> <code>${JSON.stringify(result.expected)}</code></p>
+                            <p><strong>Actual:</strong> <code>${JSON.stringify(result.actual)}</code></p>
+                        `;
+                    }
+                    if (result.error) {
+                        html += `<pre>${result.error}</pre>`;
+                    }
+                }
+                
+                if (result.logs && result.logs.length > 0) {
+                    html += '<div class="console-log">' + result.logs.join('\n') + '</div>';
+                }
+                
+                resultDiv.innerHTML = html;
+                resultsDiv.appendChild(resultDiv);
+            });
+        }
+
+        // Run tests
+        runTest('Test 1: Standard column name "Snapshots"', () => {
+            const columns = ['Snapshots', 'CAISO_NP15 LMP ($/MWh)', 'Gas Price ($/MMBtu)'];
+            const dateCol = findDateColumn(columns);
+            return {
+                pass: dateCol === 'Snapshots',
+                message: dateCol === 'Snapshots' 
+                    ? 'Successfully found "Snapshots" column'
+                    : 'Failed to find "Snapshots" column',
+                expected: 'Snapshots',
+                actual: dateCol
+            };
+        });
+
+        runTest('Test 2: Case insensitive - "snapshots" (lowercase)', () => {
+            const columns = ['snapshots', 'CAISO_NP15 LMP ($/MWh)', 'Gas Price ($/MMBtu)'];
+            const dateCol = findDateColumn(columns);
+            return {
+                pass: dateCol === 'snapshots',
+                message: dateCol === 'snapshots' 
+                    ? 'Successfully found "snapshots" column (lowercase)'
+                    : 'Failed to find "snapshots" column',
+                expected: 'snapshots',
+                actual: dateCol
+            };
+        });
+
+        runTest('Test 3: Case insensitive - "SNAPSHOTS" (uppercase)', () => {
+            const columns = ['SNAPSHOTS', 'CAISO_NP15 LMP ($/MWh)', 'Gas Price ($/MMBtu)'];
+            const dateCol = findDateColumn(columns);
+            return {
+                pass: dateCol === 'SNAPSHOTS',
+                message: dateCol === 'SNAPSHOTS' 
+                    ? 'Successfully found "SNAPSHOTS" column (uppercase)'
+                    : 'Failed to find "SNAPSHOTS" column',
+                expected: 'SNAPSHOTS',
+                actual: dateCol
+            };
+        });
+
+        runTest('Test 4: Leading whitespace " Snapshots"', () => {
+            const columns = [' Snapshots', 'CAISO_NP15 LMP ($/MWh)', 'Gas Price ($/MMBtu)'];
+            const dateCol = findDateColumn(columns);
+            return {
+                pass: dateCol === ' Snapshots',
+                message: dateCol === ' Snapshots' 
+                    ? 'Successfully found " Snapshots" column (with leading space)'
+                    : 'Failed to find " Snapshots" column',
+                expected: ' Snapshots',
+                actual: dateCol
+            };
+        });
+
+        runTest('Test 5: Trailing whitespace "Snapshots "', () => {
+            const columns = ['Snapshots ', 'CAISO_NP15 LMP ($/MWh)', 'Gas Price ($/MMBtu)'];
+            const dateCol = findDateColumn(columns);
+            return {
+                pass: dateCol === 'Snapshots ',
+                message: dateCol === 'Snapshots ' 
+                    ? 'Successfully found "Snapshots " column (with trailing space)'
+                    : 'Failed to find "Snapshots " column',
+                expected: 'Snapshots ',
+                actual: dateCol
+            };
+        });
+
+        runTest('Test 6: BOM character in column name', () => {
+            const columns = ['\uFEFFSnapshots', 'CAISO_NP15 LMP ($/MWh)', 'Gas Price ($/MMBtu)'];
+            const dateCol = findDateColumn(columns);
+            return {
+                pass: dateCol === '\uFEFFSnapshots',
+                message: dateCol === '\uFEFFSnapshots' 
+                    ? 'Successfully found column with BOM character'
+                    : 'Failed to find column with BOM character',
+                expected: '\uFEFFSnapshots',
+                actual: dateCol
+            };
+        });
+
+        runTest('Test 7: Alternative name "Date"', () => {
+            const columns = ['Date', 'CAISO_NP15 LMP ($/MWh)', 'Gas Price ($/MMBtu)'];
+            const dateCol = findDateColumn(columns);
+            return {
+                pass: dateCol === 'Date',
+                message: dateCol === 'Date' 
+                    ? 'Successfully found "Date" column'
+                    : 'Failed to find "Date" column',
+                expected: 'Date',
+                actual: dateCol
+            };
+        });
+
+        runTest('Test 8: Alternative name "DateTime"', () => {
+            const columns = ['DateTime', 'CAISO_NP15 LMP ($/MWh)', 'Gas Price ($/MMBtu)'];
+            const dateCol = findDateColumn(columns);
+            return {
+                pass: dateCol === 'DateTime',
+                message: dateCol === 'DateTime' 
+                    ? 'Successfully found "DateTime" column'
+                    : 'Failed to find "DateTime" column',
+                expected: 'DateTime',
+                actual: dateCol
+            };
+        });
+
+        runTest('Test 9: Alternative name "Timestamp"', () => {
+            const columns = ['Timestamp', 'CAISO_NP15 LMP ($/MWh)', 'Gas Price ($/MMBtu)'];
+            const dateCol = findDateColumn(columns);
+            return {
+                pass: dateCol === 'Timestamp',
+                message: dateCol === 'Timestamp' 
+                    ? 'Successfully found "Timestamp" column'
+                    : 'Failed to find "Timestamp" column',
+                expected: 'Timestamp',
+                actual: dateCol
+            };
+        });
+
+        runTest('Test 10: Column with "date" in name', () => {
+            const columns = ['startdate', 'CAISO_NP15 LMP ($/MWh)', 'Gas Price ($/MMBtu)'];
+            const dateCol = findDateColumn(columns);
+            return {
+                pass: dateCol === 'startdate',
+                message: dateCol === 'startdate' 
+                    ? 'Successfully found "startdate" column (contains "date")'
+                    : 'Failed to find "startdate" column',
+                expected: 'startdate',
+                actual: dateCol
+            };
+        });
+
+        runTest('Test 11: No date column present', () => {
+            const columns = ['Hours', 'CAISO_NP15 LMP ($/MWh)', 'Gas Price ($/MMBtu)'];
+            const dateCol = findDateColumn(columns);
+            return {
+                pass: dateCol === null,
+                message: dateCol === null 
+                    ? 'Correctly returned null when no date column found'
+                    : 'Incorrectly found a date column',
+                expected: null,
+                actual: dateCol
+            };
+        });
+
+        runTest('Test 12: Combined issues - BOM + whitespace + case', () => {
+            const columns = ['\uFEFF snapshots ', 'CAISO_NP15 LMP ($/MWh)', 'Gas Price ($/MMBtu)'];
+            const dateCol = findDateColumn(columns);
+            return {
+                pass: dateCol === '\uFEFF snapshots ',
+                message: dateCol === '\uFEFF snapshots ' 
+                    ? 'Successfully found column with BOM + whitespace + lowercase'
+                    : 'Failed to find column with combined issues',
+                expected: '\uFEFF snapshots ',
+                actual: dateCol
+            };
+        });
+
+        // Display all results
+        displayResults();
+    </script>
+</body>
+</html>

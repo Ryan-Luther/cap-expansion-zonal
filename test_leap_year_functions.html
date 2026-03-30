@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Leap Year Functions Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f0f0f0;
+        }
+        .test-result {
+            background-color: white;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+            border-left: 5px solid #ccc;
+        }
+        .test-result.pass {
+            border-left-color: #4caf50;
+        }
+        .test-result.fail {
+            border-left-color: #f44336;
+        }
+        pre {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border-radius: 3px;
+            overflow-x: auto;
+            font-size: 11px;
+        }
+        .summary {
+            background-color: #e3f2fd;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>Leap Year Functions - Test Suite</h1>
+    <p>This test validates the leap year handling functions.</p>
+    
+    <div id="results"></div>
+    
+    <script>
+        /**
+         * Check if a year is a leap year
+         */
+        function isLeapYear(year) {
+            return (year % 4 === 0 && year % 100 !== 0) || (year % 400 === 0);
+        }
+        
+        /**
+         * Remove Feb 29 from hourly data array if it's a leap year
+         */
+        function removeLeapDay(hourlyData, year) {
+            if (!hourlyData || hourlyData.length === 0) {
+                console.error('removeLeapDay: No data provided');
+                return hourlyData;
+            }
+            
+            // If not a leap year, return as-is
+            if (!isLeapYear(year)) {
+                console.log(`Year ${year} is not a leap year, no adjustment needed (${hourlyData.length} hours)`);
+                return hourlyData;
+            }
+            
+            // If data doesn't have leap day, return as-is
+            if (hourlyData.length !== 8784) {
+                console.log(`Year ${year} is a leap year but data has ${hourlyData.length} hours (expected 8784), no adjustment`);
+                return hourlyData;
+            }
+            
+            // Constants for Feb 29 boundaries
+            const leapDayStartHour = 1416;  // Start of Feb 29: 59 days × 24 hours/day
+            const leapDayEndHour = 1440;    // Start of Mar 1: 60 days × 24 hours/day
+            
+            console.log(`Year ${year} is a leap year with ${hourlyData.length} hours`);
+            console.log(`Removing Feb 29 (hours ${leapDayStartHour}-${leapDayEndHour - 1})...`);
+            
+            const adjustedData = [
+                ...hourlyData.slice(0, leapDayStartHour),
+                ...hourlyData.slice(leapDayEndHour)
+            ];
+            
+            console.log(`After removing leap day: ${adjustedData.length} hours ✓`);
+            
+            if (adjustedData.length !== 8760) {
+                console.error(`ERROR: Expected 8760 hours after removing leap day, got ${adjustedData.length}`);
+            }
+            
+            return adjustedData;
+        }
+        
+        /**
+         * Validate that an hourly array has exactly 8760 hours
+         */
+        function validateHourlyArrayLength(arr, context) {
+            if (!arr) {
+                console.error(`${context}: Array is null or undefined`);
+                return false;
+            }
+            
+            if (arr.length !== 8760) {
+                console.error(`${context}: Expected 8760 hours, got ${arr.length}`);
+                
+                if (arr.length === 8784) {
+                    console.error(`This appears to be leap year data. Call removeLeapDay() to fix.`);
+                } else if (arr.length % 8760 === 0) {
+                    console.error(`This appears to be ${arr.length / 8760} year(s) of data.`);
+                }
+                
+                return false;
+            }
+            
+            return true;
+        }
+        
+        // Test functions
+        function runTests() {
+            const results = [];
+            
+            // Test 1: isLeapYear function
+            console.log('\n=== Test 1: isLeapYear ===');
+            const leapYearTests = [
+                { year: 2020, expected: true },
+                { year: 2021, expected: false },
+                { year: 2022, expected: false },
+                { year: 2023, expected: false },
+                { year: 2024, expected: true },
+                { year: 2028, expected: true },
+                { year: 2100, expected: false }, // Not a leap year (divisible by 100 but not 400)
+                { year: 2000, expected: true }  // Leap year (divisible by 400)
+            ];
+            
+            let allPassed = true;
+            for (const test of leapYearTests) {
+                const result = isLeapYear(test.year);
+                const passed = result === test.expected;
+                console.log(`  Year ${test.year}: ${result} (expected ${test.expected}) ${passed ? '✓' : '✗'}`);
+                if (!passed) allPassed = false;
+            }
+            
+            results.push({
+                name: 'Test 1: isLeapYear function',
+                passed: allPassed,
+                details: `Tested ${leapYearTests.length} years`
+            });
+            
+            // Test 2: removeLeapDay with leap year data
+            console.log('\n=== Test 2: removeLeapDay with 8784 hours ===');
+            const leapYearData = Array.from({ length: 8784 }, (_, i) => ({ hour: i, value: i }));
+            const adjusted2024 = removeLeapDay(leapYearData, 2024);
+            const test2Passed = adjusted2024.length === 8760;
+            console.log(`  Result: ${adjusted2024.length} hours (expected 8760) ${test2Passed ? '✓' : '✗'}`);
+            
+            // Verify that Feb 29 was removed correctly
+            const firstPart = adjusted2024.slice(0, 1416);
+            const secondPart = adjusted2024.slice(1416);
+            const verifyFirstPart = firstPart[0].hour === 0 && firstPart[1415].hour === 1415;
+            const verifySecondPart = secondPart[0].hour === 1440 && secondPart[7343].hour === 8783;
+            const dataIntegrityPassed = verifyFirstPart && verifySecondPart;
+            console.log(`  Data integrity: ${dataIntegrityPassed ? '✓' : '✗'}`);
+            
+            results.push({
+                name: 'Test 2: removeLeapDay with 8784 hours',
+                passed: test2Passed && dataIntegrityPassed,
+                details: `Removed Feb 29 from 2024 data, result: ${adjusted2024.length} hours`
+            });
+            
+            // Test 3: removeLeapDay with non-leap year
+            console.log('\n=== Test 3: removeLeapDay with non-leap year ===');
+            const normalYearData = Array.from({ length: 8760 }, (_, i) => ({ hour: i, value: i }));
+            const adjusted2023 = removeLeapDay(normalYearData, 2023);
+            // For non-leap years, the function should return the same reference (not a copy)
+            const test3Passed = adjusted2023.length === 8760 && adjusted2023 === normalYearData;
+            console.log(`  Result: ${adjusted2023.length} hours (expected 8760, no change) ${test3Passed ? '✓' : '✗'}`);
+            
+            results.push({
+                name: 'Test 3: removeLeapDay with non-leap year',
+                passed: test3Passed,
+                details: `2023 data unchanged: ${adjusted2023.length} hours`
+            });
+            
+            // Test 4: removeLeapDay with wrong length
+            console.log('\n=== Test 4: removeLeapDay with wrong length ===');
+            const wrongLengthData = Array.from({ length: 8760 }, (_, i) => ({ hour: i, value: i }));
+            const adjusted2024Wrong = removeLeapDay(wrongLengthData, 2024);
+            // For leap year with wrong data length, the function should return the same reference
+            const test4Passed = adjusted2024Wrong.length === 8760 && adjusted2024Wrong === wrongLengthData;
+            console.log(`  Result: ${adjusted2024Wrong.length} hours (expected 8760, no change) ${test4Passed ? '✓' : '✗'}`);
+            
+            results.push({
+                name: 'Test 4: removeLeapDay with wrong length',
+                passed: test4Passed,
+                details: `2024 data with 8760 hours unchanged`
+            });
+            
+            // Test 5: validateHourlyArrayLength
+            console.log('\n=== Test 5: validateHourlyArrayLength ===');
+            const validArray = Array.from({ length: 8760 }, (_, i) => i);
+            const invalidArray8784 = Array.from({ length: 8784 }, (_, i) => i);
+            const invalidArray17520 = Array.from({ length: 17520 }, (_, i) => i);
+            
+            const valid1 = validateHourlyArrayLength(validArray, 'Valid 8760 array');
+            const valid2 = !validateHourlyArrayLength(invalidArray8784, 'Invalid 8784 array');
+            const valid3 = !validateHourlyArrayLength(invalidArray17520, 'Invalid 17520 array');
+            const test5Passed = valid1 && valid2 && valid3;
+            
+            console.log(`  8760 hours: ${valid1 ? 'Valid ✓' : 'Invalid ✗'}`);
+            console.log(`  8784 hours: ${valid2 ? 'Invalid (as expected) ✓' : 'Unexpected result ✗'}`);
+            console.log(`  17520 hours: ${valid3 ? 'Invalid (as expected) ✓' : 'Unexpected result ✗'}`);
+            
+            results.push({
+                name: 'Test 5: validateHourlyArrayLength',
+                passed: test5Passed,
+                details: `Correctly validated array lengths`
+            });
+            
+            // Display results
+            const resultsDiv = document.getElementById('results');
+            const passCount = results.filter(r => r.passed).length;
+            const totalCount = results.length;
+            
+            resultsDiv.innerHTML = `
+                <div class="summary">
+                    Test Results: ${passCount}/${totalCount} tests passed
+                    ${passCount === totalCount ? ' 🎉' : ' ⚠️'}
+                </div>
+            `;
+            
+            results.forEach(result => {
+                const div = document.createElement('div');
+                div.className = `test-result ${result.passed ? 'pass' : 'fail'}`;
+                div.innerHTML = `
+                    <h3>${result.name} ${result.passed ? '✓' : '✗'}</h3>
+                    <p>${result.details}</p>
+                `;
+                resultsDiv.appendChild(div);
+            });
+            
+            console.log(`\n=== Summary ===`);
+            console.log(`Tests passed: ${passCount}/${totalCount}`);
+        }
+        
+        // Run tests on load
+        window.addEventListener('load', runTests);
+    </script>
+</body>
+</html>

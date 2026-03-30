@@ -1,0 +1,23 @@
+# Test data and exports
+*.csv
+test_*.csv
+capacity_expansion_*.csv
+
+# Test files
+test_adam_optimizer.html
+
+# Temporary files
+/tmp/
+*.tmp
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+test_price_metrics_fix.html

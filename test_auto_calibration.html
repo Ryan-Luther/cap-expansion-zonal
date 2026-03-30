@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Auto-Calibration Test Suite</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f0f0f0;
+        }
+        .test-result {
+            background-color: white;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+            border-left: 5px solid #ccc;
+        }
+        .test-result.pass {
+            border-left-color: #4caf50;
+        }
+        .test-result.fail {
+            border-left-color: #f44336;
+        }
+        .test-result.warn {
+            border-left-color: #ff9800;
+        }
+        pre {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border-radius: 3px;
+            overflow-x: auto;
+            font-size: 11px;
+        }
+        .summary {
+            background-color: #e3f2fd;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 16px;
+            cursor: pointer;
+            background-color: #2196F3;
+            color: white;
+            border: none;
+            border-radius: 4px;
+        }
+        button:hover {
+            background-color: #0b7dda;
+        }
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+    <h1>Auto-Calibration Test Suite</h1>
+    <p>This test validates that auto-calibration works correctly with the test data files.</p>
+    
+    <div id="results"></div>
+    
+    <button id="runTests">Run Tests with Test Files</button>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
+    <script>
+        const testResults = [];
+        
+        async function loadTestFile(filename) {
+            const response = await fetch(`Cap Expansion 1.0 test files/${filename}`);
+            const text = await response.text();
+            return new Promise((resolve, reject) => {
+                Papa.parse(text, {
+                    header: true,
+                    dynamicTyping: true,
+                    complete: (results) => resolve(results.data),
+                    error: (error) => reject(error)
+                });
+            });
+        }
+        
+        async function runTests() {
+            const resultsDiv = document.getElementById('results');
+            const button = document.getElementById('runTests');
+            
+            button.disabled = true;
+            resultsDiv.innerHTML = '<p>Loading test files...</p>';
+            testResults.length = 0; // Clear previous results
+            
+            try {
+                // Test 1: Load historical price file
+                testResults.push(await testHistoricalFileLoad());
+                
+                // Test 2: Parse zones from historical data
+                testResults.push(await testZoneParsing());
+                
+                // Test 3: Extract prices for specific zone
+                testResults.push(await testPriceExtraction());
+                
+                // Test 4: Verify auto-calibration blockers
+                testResults.push(await testAutoCalibrationBlockers());
+                
+                // Test 5: Full auto-calibration flow (if possible)
+                testResults.push(await testFullAutoCalibration());
+                
+                // Display results
+                displayResults();
+                
+            } catch (error) {
+                resultsDiv.innerHTML = `<div class="test-result fail">
+                    <h3>FATAL ERROR</h3>
+                    <p>${error.message}</p>
+                    <pre>${error.stack}</pre>
+                </div>`;
+            } finally {
+                button.disabled = false;
+            }
+        }
+        
+        async function testHistoricalFileLoad() {
+            try {
+                const historicalData = await loadTestFile('hist_prices.csv');
+                
+                if (!historicalData || historicalData.length === 0) {
+                    return {
+                        name: 'Historical File Load',
+                        status: 'fail',
+                        message: 'Failed to load historical price file',
+                        details: 'File is empty or not found'
+                    };
+                }
+                
+                const columns = Object.keys(historicalData[0]);
+                return {
+                    name: 'Historical File Load',
+                    status: 'pass',
+                    message: `Successfully loaded ${historicalData.length} rows`,
+                    details: `First 10 columns: ${columns.slice(0, 10).join(', ')}...\n(Total: ${columns.length} columns)`
+                };
+                
+            } catch (error) {
+                return {
+                    name: 'Historical File Load',
+                    status: 'fail',
+                    message: 'Exception during file load',
+                    details: error.message
+                };
+            }
+        }
+        
+        async function testZoneParsing() {
+            try {
+                const historicalData = await loadTestFile('hist_prices.csv');
+                const columns = Object.keys(historicalData[0]);
+                
+                // Filter LMP columns
+                const lmpCols = columns.filter(col => col.includes('LMP ($/MWh)'));
+                
+                if (lmpCols.length === 0) {
+                    return {
+                        name: 'Zone Parsing',
+                        status: 'fail',
+                        message: 'No LMP columns detected in historical file',
+                        details: `Available columns: ${columns.join(', ')}`
+                    };
+                }
+                
+                // Parse zones from LMP columns
+                const zones = [];
+                const isoZoneMap = {};
+                
+                lmpCols.forEach(col => {
+                    // Pattern: ISO_ZONE LMP ($/MWh)
+                    const match = col.match(/^([A-Z]+)_(.+)\s+LMP/);
+                    if (match) {
+                        const iso = match[1];
+                        const zone = match[2];
+                        if (!isoZoneMap[iso]) isoZoneMap[iso] = [];
+                        isoZoneMap[iso].push(zone);
+                        zones.push(`${iso}_${zone}`);
+                    }
+                });
+                
+                if (zones.length === 0) {
+                    return {
+                        name: 'Zone Parsing',
+                        status: 'fail',
+                        message: 'No zones parsed from LMP columns',
+                        details: `LMP columns found: ${lmpCols.slice(0, 5).join(', ')}...`
+                    };
+                }
+                
+                const isoSummary = Object.entries(isoZoneMap).map(([iso, zones]) => 
+                    `${iso}: ${zones.length} zones`
+                ).join('\n');
+                
+                return {
+                    name: 'Zone Parsing',
+                    status: 'pass',
+                    message: `Detected ${zones.length} zones across ${Object.keys(isoZoneMap).length} ISOs`,
+                    details: `ISO breakdown:\n${isoSummary}\n\nSample zones: ${zones.slice(0, 10).join(', ')}...`
+                };
+                
+            } catch (error) {
+                return {
+                    name: 'Zone Parsing',
+                    status: 'fail',
+                    message: 'Exception during zone parsing',
+                    details: error.message
+                };
+            }
+        }
+        
+        async function testPriceExtraction() {
+            try {
+                const historicalData = await loadTestFile('hist_prices.csv');
+                const columns = Object.keys(historicalData[0]);
+                const lmpCols = columns.filter(col => col.includes('LMP ($/MWh)'));
+                
+                if (lmpCols.length === 0) {
+                    return {
+                        name: 'Price Extraction',
+                        status: 'fail',
+                        message: 'No LMP columns available to test',
+                        details: ''
+                    };
+                }
+                
+                const testColumn = lmpCols[0];
+                const prices = [];
+                
+                for (const row of historicalData) {
+                    const price = row[testColumn];
+                    if (price !== null && price !== undefined && !isNaN(price)) {
+                        prices.push(price);
+                    }
+                }
+                
+                if (prices.length < 100) {
+                    return {
+                        name: 'Price Extraction',
+                        status: 'fail',
+                        message: `Insufficient data for column ${testColumn}`,
+                        details: `Only ${prices.length} valid prices found`
+                    };
+                }
+                
+                // Calculate statistics using loop-based approach to avoid stack overflow on large datasets
+                const avgPrice = prices.reduce((a, b) => a + b, 0) / prices.length;
+                let minPrice = prices[0];
+                let maxPrice = prices[0];
+                for (let i = 1; i < prices.length; i++) {
+                    if (prices[i] < minPrice) minPrice = prices[i];
+                    if (prices[i] > maxPrice) maxPrice = prices[i];
+                }
+                const stdDev = Math.sqrt(
+                    prices.reduce((sum, p) => sum + Math.pow(p - avgPrice, 2), 0) / prices.length
+                );
+                
+                return {
+                    name: 'Price Extraction',
+                    status: 'pass',
+                    message: `Extracted ${prices.length} prices for ${testColumn}`,
+                    details: `Statistics:\n  Average: $${avgPrice.toFixed(2)}/MWh\n  Min: $${minPrice.toFixed(2)}/MWh\n  Max: $${maxPrice.toFixed(2)}/MWh\n  Std Dev: $${stdDev.toFixed(2)}/MWh`
+                };
+                
+            } catch (error) {
+                return {
+                    name: 'Price Extraction',
+                    status: 'fail',
+                    message: 'Exception during price extraction',
+                    details: error.message
+                };
+            }
+        }
+        
+        async function testAutoCalibrationBlockers() {
+            // This test checks what would block auto-calibration
+            const blockers = [];
+            
+            try {
+                const historicalData = await loadTestFile('hist_prices.csv');
+                if (!historicalData || historicalData.length === 0) {
+                    blockers.push('No historical data');
+                }
+            } catch {
+                blockers.push('Cannot load historical file');
+            }
+            
+            // Check for other required data (these would normally come from main app)
+            // Note: These checks are hypothetical since we're in standalone test
+            blockers.push('No cached reserve margins (model not run - expected in standalone test)');
+            blockers.push('No cached core results (model not run - expected in standalone test)');
+            blockers.push('No zone selected (no main app context - expected in standalone test)');
+            
+            return {
+                name: 'Auto-Calibration Readiness',
+                status: 'warn',
+                message: 'Auto-calibration would be blocked (expected in standalone test)',
+                details: `Expected blockers:\n${blockers.map(b => `  - ${b}`).join('\n')}\n\nNote: These are expected when running tests standalone without the main application.`
+            };
+        }
+        
+        async function testFullAutoCalibration() {
+            return {
+                name: 'Full Auto-Calibration Flow',
+                status: 'warn',
+                message: 'Skipped - requires full application context',
+                details: 'This test needs the main application (ETR_Dynamic_Cap_Expansion_Forecast_1.6.html) to be loaded with all dependencies.\n\nTo test auto-calibration:\n1. Open ETR_Dynamic_Cap_Expansion_Forecast_1.6.html\n2. Load all required data files\n3. Run the model\n4. Upload historical prices (hist_prices.csv)\n5. Check console for auto-calibration logs'
+            };
+        }
+        
+        function displayResults() {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = '';
+            
+            const passed = testResults.filter(r => r.status === 'pass').length;
+            const failed = testResults.filter(r => r.status === 'fail').length;
+            const warned = testResults.filter(r => r.status === 'warn').length;
+            
+            const summary = document.createElement('div');
+            summary.className = 'summary';
+            summary.innerHTML = `Test Summary: ${passed} passed, ${failed} failed, ${warned} warnings (${testResults.length} total)`;
+            resultsDiv.appendChild(summary);
+            
+            testResults.forEach(result => {
+                const div = document.createElement('div');
+                div.className = `test-result ${result.status}`;
+                div.innerHTML = `
+                    <h3>${result.status.toUpperCase()}: ${result.name}</h3>
+                    <p><strong>${result.message}</strong></p>
+                    <pre>${result.details}</pre>
+                `;
+                resultsDiv.appendChild(div);
+            });
+        }
+        
+        document.getElementById('runTests').addEventListener('click', runTests);
+        
+        // Auto-run tests on page load
+        window.addEventListener('load', () => {
+            console.log('Auto-Calibration Test Suite loaded. Click "Run Tests" to start.');
+        });
+    </script>
+</body>
+</html>

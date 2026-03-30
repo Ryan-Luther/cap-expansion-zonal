@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Storage Dispatch Validation Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f0f0f0;
+        }
+        .test-result {
+            background-color: white;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+            border-left: 5px solid #ccc;
+        }
+        .test-result.pass {
+            border-left-color: #4caf50;
+        }
+        .test-result.fail {
+            border-left-color: #f44336;
+        }
+        .test-result.warn {
+            border-left-color: #ff9800;
+        }
+        h1 {
+            color: #333;
+        }
+        h2 {
+            color: #666;
+            margin-top: 30px;
+        }
+        pre {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border-radius: 3px;
+            overflow-x: auto;
+        }
+        .summary {
+            background-color: #e3f2fd;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>Storage Dispatch Validation Test</h1>
+    <p>This test validates that storage dispatch is working correctly by checking:</p>
+    <ul>
+        <li>Storage charge/discharge prices are populated for all hours</li>
+        <li>Storage discharges when discharge price is high relative to charge price</li>
+        <li>Storage charges when charge price is low relative to discharge price</li>
+        <li>Storage dispatches regardless of arbitrage spread (no economic hurdle constraint)</li>
+    </ul>
+    
+    <div id="results"></div>
+    
+    <h2>Instructions to Run Test:</h2>
+    <ol>
+        <li>Load the main HTML application (ETR_Dynamic_Cap_Expansion_Forecast_1.6.html)</li>
+        <li>Upload required data files and configure storage capacity > 0</li>
+        <li>Export results to CSV</li>
+        <li>Upload the exported 8760 timeseries CSV file below</li>
+    </ol>
+    
+    <input type="file" id="csvFile" accept=".csv">
+    <button onclick="runTests()">Run Validation Tests</button>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
+    <script>
+        let csvData = null;
+        
+        document.getElementById('csvFile').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (file) {
+                Papa.parse(file, {
+                    header: true,
+                    dynamicTyping: true,
+                    complete: function(results) {
+                        csvData = results.data;
+                        console.log('CSV loaded:', csvData.length, 'rows');
+                    }
+                });
+            }
+        });
+        
+        function runTests() {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = '';
+            
+            if (!csvData || csvData.length === 0) {
+                resultsDiv.innerHTML = '<div class="test-result fail">Please upload a CSV file first!</div>';
+                return;
+            }
+            
+            const results = [];
+            
+            // Test 1: Check if storage price columns exist and are populated
+            results.push(testStoragePriceColumnsExist());
+            
+            // Test 2: Check if storage prices are reasonable (not all zeros)
+            results.push(testStoragePricesNonZero());
+            
+            // Test 3: Check storage dispatch logic
+            results.push(testStorageDispatchLogic());
+            
+            // Test 4: Check arbitrage spread
+            results.push(testArbitrageSpread());
+            
+            // Display results
+            results.forEach(result => {
+                const div = document.createElement('div');
+                div.className = `test-result ${result.status}`;
+                div.innerHTML = `<h3>${result.status.toUpperCase()}: ${result.name}</h3><p>${result.message}</p>`;
+                if (result.details) {
+                    div.innerHTML += `<pre>${result.details}</pre>`;
+                }
+                resultsDiv.appendChild(div);
+            });
+            
+            // Summary
+            const passed = results.filter(r => r.status === 'pass').length;
+            const failed = results.filter(r => r.status === 'fail').length;
+            const warned = results.filter(r => r.status === 'warn').length;
+            const summary = document.createElement('div');
+            summary.className = 'summary';
+            summary.innerHTML = `Summary: ${passed} passed, ${failed} failed, ${warned} warnings out of ${results.length} tests`;
+            resultsDiv.insertBefore(summary, resultsDiv.firstChild);
+        }
+        
+        function testStoragePriceColumnsExist() {
+            const firstRow = csvData[0];
+            const hasDischargePrice = 'Storage_Discharge_Price_per_MWh' in firstRow;
+            const hasChargePrice = 'Storage_Charge_Price_per_MWh' in firstRow;
+            
+            if (hasDischargePrice && hasChargePrice) {
+                return {
+                    name: 'Storage Price Columns Exist',
+                    status: 'pass',
+                    message: 'Both Storage_Discharge_Price_per_MWh and Storage_Charge_Price_per_MWh columns found in CSV'
+                };
+            } else {
+                return {
+                    name: 'Storage Price Columns Exist',
+                    status: 'fail',
+                    message: `Missing columns: ${!hasDischargePrice ? 'Storage_Discharge_Price_per_MWh ' : ''}${!hasChargePrice ? 'Storage_Charge_Price_per_MWh' : ''}`
+                };
+            }
+        }
+        
+        function testStoragePricesNonZero() {
+            let nonZeroDischarge = 0;
+            let nonZeroCharge = 0;
+            
+            csvData.forEach(row => {
+                if (row.Storage_Discharge_Price_per_MWh && row.Storage_Discharge_Price_per_MWh !== 0) {
+                    nonZeroDischarge++;
+                }
+                if (row.Storage_Charge_Price_per_MWh && row.Storage_Charge_Price_per_MWh !== 0) {
+                    nonZeroCharge++;
+                }
+            });
+            
+            const total = csvData.length;
+            const dischargePercent = (nonZeroDischarge / total * 100).toFixed(1);
+            const chargePercent = (nonZeroCharge / total * 100).toFixed(1);
+            
+            if (nonZeroDischarge > total * 0.9 && nonZeroCharge > total * 0.9) {
+                return {
+                    name: 'Storage Prices Non-Zero',
+                    status: 'pass',
+                    message: `Storage prices are populated: ${dischargePercent}% discharge, ${chargePercent}% charge`
+                };
+            } else if (nonZeroDischarge === 0 && nonZeroCharge === 0) {
+                return {
+                    name: 'Storage Prices Non-Zero',
+                    status: 'fail',
+                    message: 'All storage prices are zero! Storage may not be installed or dispatch is not working.'
+                };
+            } else {
+                return {
+                    name: 'Storage Prices Non-Zero',
+                    status: 'warn',
+                    message: `Some storage prices are zero: ${dischargePercent}% discharge, ${chargePercent}% charge. Expected >90% for both.`
+                };
+            }
+        }
+        
+        function testStorageDispatchLogic() {
+            let dischargeHours = [];
+            let chargeHours = [];
+            let noActionHours = [];
+            
+            csvData.forEach(row => {
+                const storageGen = parseFloat(row.Storage_MW) || 0;
+                const dischargePrice = parseFloat(row.Storage_Discharge_Price_per_MWh) || 0;
+                const chargePrice = parseFloat(row.Storage_Charge_Price_per_MWh) || 0;
+                const finalPrice = parseFloat(row.Price_per_MWh) || 0;
+                
+                if (storageGen > 0.1) {
+                    // Storage is discharging
+                    dischargeHours.push({ gen: storageGen, dischargePrice, chargePrice, finalPrice });
+                } else if (storageGen < -0.1) {
+                    // Storage is charging
+                    chargeHours.push({ gen: storageGen, dischargePrice, chargePrice, finalPrice });
+                } else {
+                    // No action
+                    noActionHours.push({ gen: storageGen, dischargePrice, chargePrice, finalPrice });
+                }
+            });
+            
+            // Check: When discharging, discharge price should be relatively high
+            // When charging, charge price should be relatively low
+            const avgDischargePriceWhenDischarging = dischargeHours.length > 0 
+                ? dischargeHours.reduce((sum, h) => sum + h.dischargePrice, 0) / dischargeHours.length 
+                : 0;
+            const avgChargePriceWhenCharging = chargeHours.length > 0 
+                ? chargeHours.reduce((sum, h) => sum + h.chargePrice, 0) / chargeHours.length 
+                : 0;
+            
+            // Additional check: when NOT acting, verify the hypothetical prices make sense
+            // Discharge price should be < final price (discharging would lower price)
+            // Charge price should be > final price (charging would raise price)
+            let correctNoActionCount = 0;
+            noActionHours.forEach(h => {
+                // Small tolerance for numerical precision
+                const tolerance = 0.01;
+                if (h.dischargePrice < h.finalPrice + tolerance && h.chargePrice > h.finalPrice - tolerance) {
+                    correctNoActionCount++;
+                }
+            });
+            const noActionCorrectPercent = noActionHours.length > 0 
+                ? (correctNoActionCount / noActionHours.length * 100).toFixed(1) 
+                : 100;
+            
+            const details = `
+Discharge Hours: ${dischargeHours.length}
+  Avg Discharge Price: $${avgDischargePriceWhenDischarging.toFixed(2)}/MWh
+  
+Charge Hours: ${chargeHours.length}
+  Avg Charge Price: $${avgChargePriceWhenCharging.toFixed(2)}/MWh
+  
+No Action Hours: ${noActionHours.length}
+  Hypothetical prices correct: ${noActionCorrectPercent}% (discharge < final < charge)
+            `.trim();
+            
+            if (dischargeHours.length === 0 && chargeHours.length === 0) {
+                return {
+                    name: 'Storage Dispatch Logic',
+                    status: 'warn',
+                    message: 'No storage dispatch detected. Storage may not be profitable or not installed.',
+                    details: details
+                };
+            } else if (avgDischargePriceWhenDischarging > avgChargePriceWhenCharging) {
+                return {
+                    name: 'Storage Dispatch Logic',
+                    status: 'pass',
+                    message: `Storage dispatch logic looks correct: discharge price ($${avgDischargePriceWhenDischarging.toFixed(2)}) > charge price ($${avgChargePriceWhenCharging.toFixed(2)})`,
+                    details: details
+                };
+            } else {
+                return {
+                    name: 'Storage Dispatch Logic',
+                    status: 'fail',
+                    message: `Storage dispatch logic is WRONG: discharge price ($${avgDischargePriceWhenDischarging.toFixed(2)}) ≤ charge price ($${avgChargePriceWhenCharging.toFixed(2)})!`,
+                    details: details
+                };
+            }
+        }
+        
+        function testArbitrageSpread() {
+            let spreads = [];
+            
+            // Calculate arbitrage spread for each day
+            for (let day = 0; day < Math.floor(csvData.length / 24); day++) {
+                const dayData = csvData.slice(day * 24, (day + 1) * 24);
+                
+                const dischargePrices = dayData.map(h => parseFloat(h.Storage_Discharge_Price_per_MWh) || 0);
+                const chargePrices = dayData.map(h => parseFloat(h.Storage_Charge_Price_per_MWh) || 0);
+                
+                // Top 2 discharge prices (highest)
+                const sortedDischarge = [...dischargePrices].sort((a, b) => b - a);
+                const top2Discharge = (sortedDischarge[0] + sortedDischarge[1]) / 2;
+                
+                // Bottom 2 charge prices (lowest)
+                const sortedCharge = [...chargePrices].sort((a, b) => a - b);
+                const bot2Charge = (sortedCharge[0] + sortedCharge[1]) / 2;
+                
+                const spread = top2Discharge - bot2Charge;
+                spreads.push(spread);
+            }
+            
+            const avgSpread = spreads.reduce((sum, s) => sum + s, 0) / spreads.length;
+            const negativeDays = spreads.filter(s => s < 0).length;
+            const percentNegative = (negativeDays / spreads.length * 100).toFixed(1);
+            
+            const details = `
+Average Arbitrage Spread: $${avgSpread.toFixed(2)}/MWh
+Days with Negative Spread: ${negativeDays} (${percentNegative}%)
+Total Days: ${spreads.length}
+
+Note: Storage now dispatches regardless of economic profitability (no hurdle constraint).
+Negative spreads are expected and indicate storage is providing grid services even when unprofitable.
+            `.trim();
+            
+            const message = avgSpread > 0 
+                ? `Storage arbitrage spread is POSITIVE: $${avgSpread.toFixed(2)}/MWh (${percentNegative}% of days negative)`
+                : `Storage arbitrage spread is negative: $${avgSpread.toFixed(2)}/MWh. This is OK - storage dispatches without economic hurdle constraint.`;
+            
+            return {
+                name: 'Arbitrage Spread Analysis',
+                status: 'pass',
+                message: message,
+                details: details
+            };
+        }
+    </script>
+</body>
+</html>

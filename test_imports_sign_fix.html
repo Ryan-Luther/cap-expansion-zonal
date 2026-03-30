@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Imports Sign Fix</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .test-section {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        .pass {
+            color: green;
+            font-weight: bold;
+        }
+        .fail {
+            color: red;
+            font-weight: bold;
+        }
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 10px 0;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+        th {
+            background-color: #f2f2f2;
+        }
+        .positive {
+            color: green;
+        }
+        .negative {
+            color: red;
+        }
+    </style>
+</head>
+<body>
+    <h1>Test: Imports Sign Consistency Fix (Corrected)</h1>
+    
+    <div class="test-section">
+        <h2>Test Scenario</h2>
+        <p>This test verifies that net imports maintain correct sign convention:</p>
+        <ul>
+            <li>Positive slider value (e.g., 5000 MW) should produce positive import flows</li>
+            <li>Sign should be consistent across all years</li>
+            <li>No sign flips when transitioning between years</li>
+        </ul>
+    </div>
+
+    <div class="test-section">
+        <h2>Test Cases</h2>
+        <div id="testResults"></div>
+    </div>
+
+    <script>
+        // Simulate the imports calculation logic from the main application
+        
+        function calculateImportsPath1(maxNI0, importCapacity, netLoadPct, impSlope, impInt) {
+            // Path 1: When maxNI0 !== 0 (etrCapacities['imports'] is set)
+            // FIXED: Removed * -1 to match expected sign convention
+            const maxNItRatio = importCapacity / maxNI0;
+            const flow = maxNI0 * (impSlope * netLoadPct + ((impInt + 1) - maxNItRatio));
+            return flow;
+        }
+
+        function calculateImportsPath2(importCapacity, loadFactor, impSlope, impInt) {
+            // Path 2: When maxNI0 === 0 (etrCapacities['imports'] is NOT set)
+            // This is the fallback path that has OPPOSITE sign convention
+            const limitMW = Math.abs(importCapacity);
+            const capacitySign = Math.sign(importCapacity);
+            let importPct = Math.max(-1, Math.min(1, (impSlope * loadFactor) + impInt));
+            const flow = limitMW * importPct * capacitySign;
+            return flow;
+        }
+
+        function runTests() {
+            const results = [];
+            
+            // Test parameters (typical values)
+            const impSlope = 0.8;
+            const impInt = 0.0;
+            const importCapacity = 5000; // Slider value (MW)
+            const netLoadPct = 0.7; // 70% of max net load
+            const loadFactor = 0.7; // Same as netLoadPct for comparison
+            
+            // Test Case 1: With etrCapacities set (year has prior data)
+            const maxNI0_withData = 4500; // Prior year imports
+            const flowPath1 = calculateImportsPath1(maxNI0_withData, importCapacity, netLoadPct, impSlope, impInt);
+            
+            results.push({
+                name: "Year 2024 (with prior year data)",
+                etrCapacities: maxNI0_withData,
+                sliderValue: importCapacity,
+                calculationPath: "Path 1 (Primary Formula)",
+                flow: flowPath1,
+                sign: flowPath1 >= 0 ? "Positive" : "Negative"
+            });
+            
+            // Test Case 2: Without etrCapacities set (year has NO prior data) - OLD BEHAVIOR
+            const maxNI0_noData = 0; // No prior year data
+            const flowPath2_old = calculateImportsPath2(importCapacity, loadFactor, impSlope, impInt);
+            
+            results.push({
+                name: "Year 2025 (no prior data - OLD BUG)",
+                etrCapacities: maxNI0_noData,
+                sliderValue: importCapacity,
+                calculationPath: "Path 2 (Fallback Formula)",
+                flow: flowPath2_old,
+                sign: flowPath2_old >= 0 ? "Positive" : "Negative"
+            });
+            
+            // Test Case 3: With etrCapacities set to slider value (year has NO prior data) - NEW FIX
+            const maxNI0_fixed = importCapacity; // Set to slider value (our fix!)
+            const flowPath1_fixed = calculateImportsPath1(maxNI0_fixed, importCapacity, netLoadPct, impSlope, impInt);
+            
+            results.push({
+                name: "Year 2025 (no prior data - WITH FIX)",
+                etrCapacities: maxNI0_fixed,
+                sliderValue: importCapacity,
+                calculationPath: "Path 1 (Primary Formula)",
+                flow: flowPath1_fixed,
+                sign: flowPath1_fixed >= 0 ? "Positive" : "Negative"
+            });
+            
+            // Display results
+            let html = '<table><tr><th>Test Case</th><th>etrCapacities[\'imports\']</th><th>Slider Value</th><th>Calculation Path</th><th>Flow (MW)</th><th>Sign</th></tr>';
+            
+            results.forEach(r => {
+                const signClass = r.sign === "Positive" ? "positive" : "negative";
+                html += `<tr>
+                    <td>${r.name}</td>
+                    <td>${r.etrCapacities}</td>
+                    <td>${r.sliderValue}</td>
+                    <td>${r.calculationPath}</td>
+                    <td class="${signClass}">${r.flow.toFixed(2)}</td>
+                    <td class="${signClass}">${r.sign}</td>
+                </tr>`;
+            });
+            
+            html += '</table>';
+            
+            // Verification
+            html += '<h3>Verification</h3>';
+            const allPositive = results.every(r => r.flow > 0);
+            const signConsistent = results[0].sign === results[1].sign && results[1].sign === results[2].sign;
+            
+            if (allPositive && signConsistent) {
+                html += '<p class="pass">✓ PASS: All flows are positive and consistent across years!</p>';
+                html += '<p>When slider = 5000 MW (net imports), all hourly flows are positive.</p>';
+                html += '<p>Sign is consistent regardless of whether prior year data exists.</p>';
+            } else if (!allPositive) {
+                html += '<p class="fail">✗ FAIL: Some flows are negative when they should be positive</p>';
+            } else if (!signConsistent) {
+                html += '<p class="fail">✗ FAIL: Sign inconsistency detected between years</p>';
+            }
+            
+            // Explanation
+            html += '<h3>Explanation</h3>';
+            html += '<p><strong>The Original Bug:</strong> When a year has no prior year data, etrCapacities[\'imports\'] was left undefined (0), causing the model to use Path 2 (fallback formula) which had different behavior from Path 1.</p>';
+            html += '<p><strong>The First Fix:</strong> Ensured etrCapacities is always populated, forcing all years to use Path 1 for consistency.</p>';
+            html += '<p><strong>The Second Fix:</strong> Removed the <code>* -1</code> from Path 1 formula so positive slider values produce positive import flows (matching user expectations).</p>';
+            html += '<p><strong>Expected Behavior:</strong> When slider = 5000 MW (net imports), hourly flows should be positive values.</p>';
+            html += '<p><strong>Formula Difference:</strong></p>';
+            html += '<ul>';
+            html += '<li><strong>Path 1 (OLD):</strong> flow = maxNI0 * (...) * <strong>-1</strong> ← Negated imports incorrectly</li>';
+            html += '<li><strong>Path 1 (NEW):</strong> flow = maxNI0 * (...) ← Correct sign convention</li>';
+            html += '<li><strong>Path 2:</strong> flow = limitMW * importPct * capacitySign ← Already correct</li>';
+            html += '</ul>';
+            
+            document.getElementById('testResults').innerHTML = html;
+        }
+        
+        // Run tests on page load
+        runTests();
+    </script>
+</body>
+</html>

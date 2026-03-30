@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Complete Year Filtering in Calibration</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        .test-section {
+            border: 1px solid #ccc;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 5px;
+        }
+        .pass { color: green; font-weight: bold; }
+        .fail { color: red; font-weight: bold; }
+        .info { color: blue; }
+        h2 { color: #333; }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            cursor: pointer;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        #console-output {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .console-log { color: #333; }
+        .console-error { color: #d9534f; }
+        .console-warn { color: #f0ad4e; }
+    </style>
+</head>
+<body>
+    <h1>Complete Year Filtering Test</h1>
+    
+    <div class="test-section">
+        <h2>Test Overview</h2>
+        <p>This test validates that <code>processHistoricalData()</code> and <code>calibrateFromZone()</code> correctly filter data to include only complete years.</p>
+        <ul>
+            <li><strong>Problem:</strong> Previously, all rows (including partial years) were used for calibration, skewing the historicalAvgPrice</li>
+            <li><strong>Fix:</strong> Now filters to complete years only during parsing</li>
+            <li><strong>Expected:</strong> Only complete years are parsed (8,760 rows per year)</li>
+        </ul>
+    </div>
+    
+    <div class="test-section">
+        <h2>Test Scenarios</h2>
+        <ol>
+            <li><strong>Single Complete Year:</strong> Data with 8,760 rows for 2024 → All rows should be parsed</li>
+            <li><strong>Mixed Complete + Partial:</strong> 8,760 rows for 2024 + 4,380 rows for 2025 → Only 2024 rows should be parsed</li>
+            <li><strong>Multiple Complete Years:</strong> 8,760 rows each for 2024 and 2025 → All 17,520 rows should be parsed</li>
+        </ol>
+    </div>
+    
+    <div class="test-section">
+        <h2>Controls</h2>
+        <button onclick="runTests()">Run All Tests</button>
+        <button onclick="clearConsole()">Clear Console</button>
+    </div>
+    
+    <div class="test-section">
+        <h2>Console Output</h2>
+        <div id="console-output"></div>
+    </div>
+    
+    <div class="test-section">
+        <h2>Test Results</h2>
+        <div id="results"></div>
+    </div>
+
+    <script>
+        // Capture console output
+        let consoleOutput = [];
+        const originalLog = console.log;
+        const originalError = console.error;
+        const originalWarn = console.warn;
+        
+        console.log = function(...args) {
+            consoleOutput.push({ type: 'log', message: args.join(' ') });
+            updateConsoleOutput();
+            originalLog.apply(console, args);
+        };
+        
+        console.error = function(...args) {
+            consoleOutput.push({ type: 'error', message: args.join(' ') });
+            updateConsoleOutput();
+            originalError.apply(console, args);
+        };
+        
+        console.warn = function(...args) {
+            consoleOutput.push({ type: 'warn', message: args.join(' ') });
+            updateConsoleOutput();
+            originalWarn.apply(console, args);
+        };
+        
+        function updateConsoleOutput() {
+            const output = document.getElementById('console-output');
+            output.innerHTML = consoleOutput.map(entry => {
+                return `<div class="console-${entry.type}">${entry.message}</div>`;
+            }).join('');
+            output.scrollTop = output.scrollHeight;
+        }
+        
+        function clearConsole() {
+            consoleOutput = [];
+            document.getElementById('console-output').innerHTML = '';
+        }
+        
+        // Mock helper functions needed from main app
+        function isLeapYear(year) {
+            return (year % 4 === 0 && year % 100 !== 0) || (year % 400 === 0);
+        }
+        
+        function normalizeColumnName(col) {
+            return col.toLowerCase().replace(/\s+/g, '').trim();
+        }
+        
+        function parseHistoricalDate(dateStr) {
+            // Simple date parser that handles "YYYY-MM-DD HH" format
+            const str = String(dateStr).trim();
+            const match = str.match(/(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2})/);
+            if (match) {
+                const [, year, month, day, hour] = match;
+                return new Date(parseInt(year), parseInt(month) - 1, parseInt(day), parseInt(hour));
+            }
+            return null;
+        }
+        
+        function getSeason(month) {
+            if (month >= 11 || month <= 2) return 'Winter';
+            if (month >= 5 && month <= 8) return 'Summer';
+            return 'Shoulder';
+        }
+        
+        // Mock cache variables
+        let cachedDataSignature = null;
+        let cachedYearDetectionResults = null;
+        
+        // Copy detectCompleteHistoricalYears function from main app
+        function detectCompleteHistoricalYears(historicalData) {
+            if (!historicalData || historicalData.length === 0) {
+                console.error('detectCompleteHistoricalYears: No data provided');
+                return null;
+            }
+            
+            // Create a signature for this dataset
+            const firstRow = historicalData[0];
+            const lastRow = historicalData[historicalData.length - 1];
+            const firstTimestamp = firstRow?.Snapshots || firstRow?.Date || firstRow?.DateTime || firstRow?.Timestamp || '';
+            const lastTimestamp = lastRow?.Snapshots || lastRow?.Date || lastRow?.DateTime || lastRow?.Timestamp || '';
+            const dataSignature = `${historicalData.length}_${firstTimestamp}_${lastTimestamp}`;
+            
+            // Return cached results if available
+            if (cachedDataSignature === dataSignature && cachedYearDetectionResults) {
+                console.log('Using cached year detection results');
+                return cachedYearDetectionResults;
+            }
+            
+            console.log('=== Detecting Complete Historical Years ===');
+            console.log(`Total rows in historical data: ${historicalData.length}`);
+            
+            // Try to find date columns
+            const columns = Object.keys(firstRow);
+            let dateColumn = null;
+            
+            const possibleDateNames = ['snapshots', 'date', 'datetime', 'timestamp'];
+            for (const col of columns) {
+                const normalized = normalizeColumnName(col);
+                if (possibleDateNames.includes(normalized)) {
+                    dateColumn = col;
+                    console.log(`Found date column: "${col}"`);
+                    break;
+                }
+            }
+            
+            if (!dateColumn) {
+                console.warn('No date column found');
+                return null;
+            }
+            
+            // Parse years from data
+            const years = new Set();
+            const yearCounts = {};
+            
+            for (const row of historicalData) {
+                let year = null;
+                
+                if (dateColumn && row[dateColumn]) {
+                    const dateStr = row[dateColumn].toString();
+                    const yearMatch = dateStr.match(/\b(20\d{2})\b/);
+                    if (yearMatch) {
+                        year = parseInt(yearMatch[1]);
+                    }
+                }
+                
+                if (year && year >= 2000 && year <= 2100) {
+                    years.add(year);
+                    yearCounts[year] = (yearCounts[year] || 0) + 1;
+                }
+            }
+            
+            if (years.size === 0) {
+                console.error('Could not detect any years from data');
+                return null;
+            }
+            
+            const sortedYears = Array.from(years).sort((a, b) => a - b);
+            console.log('Years found in data:', sortedYears);
+            console.log('Hours per year:', yearCounts);
+            
+            // Determine which years are complete
+            const completeYears = [];
+            for (const year of sortedYears) {
+                const actualHours = yearCounts[year];
+                const expectedHours = isLeapYear(year) ? 8784 : 8760;
+                const isLeap = isLeapYear(year);
+                
+                // Consider complete if within 100 hours of expected
+                const tolerance = 100;
+                if (actualHours >= expectedHours - tolerance && actualHours <= expectedHours + tolerance) {
+                    completeYears.push({
+                        year: year,
+                        actualHours: actualHours,
+                        expectedHours: expectedHours,
+                        isLeap: isLeap
+                    });
+                    console.log(`✓ Year ${year}: ${actualHours} hours (${isLeap ? 'leap year, ' : ''}complete)`);
+                } else {
+                    console.log(`✗ Year ${year}: ${actualHours} hours (partial, expected ~${expectedHours})`);
+                }
+            }
+            
+            if (completeYears.length === 0) {
+                console.error('No complete years found in historical data');
+                return null;
+            }
+            
+            const totalHours = completeYears.length * 8760;
+            console.log(`Using ${completeYears.length} complete year(s): ${completeYears.map(y => y.year).join(', ')}`);
+            
+            const result = {
+                completeYears: completeYears,
+                startYear: completeYears[0].year,
+                endYear: completeYears[completeYears.length - 1].year,
+                totalHours: totalHours,
+                numLeapYears: completeYears.filter(y => y.isLeap).length,
+                method: 'date_parsing'
+            };
+            
+            // Cache the results
+            cachedDataSignature = dataSignature;
+            cachedYearDetectionResults = result;
+            
+            return result;
+        }
+        
+        // Mock calibration function
+        function mockProcessHistoricalData(data) {
+            console.log('\n=== Testing processHistoricalData ===');
+            
+            // ✅ Detect complete years first
+            const yearInfo = detectCompleteHistoricalYears(data);
+            const validYears = new Set(yearInfo ? yearInfo.completeYears.map(y => y.year) : []);
+            console.log(`✅ Filtering to complete years only: ${Array.from(validYears).join(', ')}`);
+            
+            const parsed = [];
+            data.forEach((row, i) => {
+                const dStr = row['Date'];
+                if(!dStr) return;
+                const d = parseHistoricalDate(dStr);
+                
+                // ✅ Skip if year is not complete
+                if (d && !validYears.has(d.getFullYear())) return;
+                
+                const pStr = String(row['Power ($)'] || '0').replace(/[$,]/g, '');
+                const gStr = String(row['Gas ($)'] || '0').replace(/[$,]/g, '');
+                const p = parseFloat(pStr); 
+                const g = parseFloat(gStr); 
+                
+                if (d && !isNaN(p) && !isNaN(g)) {
+                    const h = d.getHours(); 
+                    const day = d.getDay(); 
+                    const isPeak = (day !== 0 && day !== 6 && h >= 7 && h <= 22);
+                    parsed.push({ p, g, season: getSeason(d.getMonth()), isPeak, idx: i });
+                }
+            });
+            
+            console.log(`✅ Parsed ${parsed.length} rows from complete years (expected: ${validYears.size * 8760})`);
+            
+            // Calculate average
+            if (parsed.length > 0) {
+                const avg = parsed.reduce((sum, r) => sum + r.p, 0) / parsed.length;
+                console.log(`Historical average price: $${avg.toFixed(2)}`);
+            }
+            
+            return { parsed, validYears };
+        }
+        
+        // Test utilities
+        function assert(condition, message) {
+            if (!condition) {
+                throw new Error(message);
+            }
+        }
+        
+        function generateMockData(year, hours, avgPrice) {
+            const data = [];
+            for (let h = 0; h < hours; h++) {
+                const date = new Date(year, 0, 1, 0);
+                date.setHours(h);
+                const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}`;
+                data.push({
+                    'Date': dateStr,
+                    'Power ($)': avgPrice,
+                    'Gas ($)': '3.5'
+                });
+            }
+            return data;
+        }
+        
+        // Test cases
+        function test1_SingleCompleteYear() {
+            console.log('\n========================================');
+            console.log('TEST 1: Single Complete Year (2024, 8760 hours)');
+            console.log('========================================');
+            
+            const data = generateMockData(2024, 8760, 31.53);
+            const result = mockProcessHistoricalData(data);
+            
+            assert(result.parsed.length === 8760, `Expected 8760 parsed rows, got ${result.parsed.length}`);
+            assert(result.validYears.has(2024), 'Expected 2024 to be a valid year');
+            assert(result.validYears.size === 1, `Expected 1 valid year, got ${result.validYears.size}`);
+            
+            const avg = result.parsed.reduce((sum, r) => sum + r.p, 0) / result.parsed.length;
+            assert(Math.abs(avg - 31.53) < 0.01, `Expected avg price ~31.53, got ${avg.toFixed(2)}`);
+            
+            return { pass: true, message: '✓ Single complete year parsed correctly' };
+        }
+        
+        function test2_MixedCompleteAndPartial() {
+            console.log('\n========================================');
+            console.log('TEST 2: Mixed Complete + Partial (2024: 8760h, 2025: 4380h)');
+            console.log('========================================');
+            
+            // Reset cache for new test
+            cachedDataSignature = null;
+            cachedYearDetectionResults = null;
+            
+            const data2024 = generateMockData(2024, 8760, 31.53);
+            const data2025 = generateMockData(2025, 4380, 48.00); // Only half year
+            const data = [...data2024, ...data2025];
+            
+            console.log(`Generated ${data.length} total rows: 8760 for 2024 + 4380 for 2025`);
+            
+            const result = mockProcessHistoricalData(data);
+            
+            // Should only parse 2024 (complete year)
+            assert(result.parsed.length === 8760, `Expected 8760 parsed rows (only 2024), got ${result.parsed.length}`);
+            assert(result.validYears.has(2024), 'Expected 2024 to be a valid year');
+            assert(!result.validYears.has(2025), 'Expected 2025 to NOT be a valid year (partial)');
+            assert(result.validYears.size === 1, `Expected 1 valid year, got ${result.validYears.size}`);
+            
+            const avg = result.parsed.reduce((sum, r) => sum + r.p, 0) / result.parsed.length;
+            assert(Math.abs(avg - 31.53) < 0.01, `Expected avg price ~31.53 (2024 only), got ${avg.toFixed(2)}`);
+            
+            // Verify it's NOT the combined average
+            const combinedAvg = (31.53 * 8760 + 48.00 * 4380) / (8760 + 4380);
+            assert(Math.abs(avg - combinedAvg) > 1, `Average should NOT be ${combinedAvg.toFixed(2)} (combined average)`);
+            
+            return { pass: true, message: '✓ Correctly filtered to complete year only, excluded partial year' };
+        }
+        
+        function test3_MultipleCompleteYears() {
+            console.log('\n========================================');
+            console.log('TEST 3: Multiple Complete Years (2024: 8760h, 2025: 8760h)');
+            console.log('========================================');
+            
+            // Reset cache for new test
+            cachedDataSignature = null;
+            cachedYearDetectionResults = null;
+            
+            const data2024 = generateMockData(2024, 8760, 31.53);
+            const data2025 = generateMockData(2025, 8760, 48.00);
+            const data = [...data2024, ...data2025];
+            
+            console.log(`Generated ${data.length} total rows: 8760 for 2024 + 8760 for 2025`);
+            
+            const result = mockProcessHistoricalData(data);
+            
+            // Should parse both complete years
+            assert(result.parsed.length === 17520, `Expected 17520 parsed rows (both years), got ${result.parsed.length}`);
+            assert(result.validYears.has(2024), 'Expected 2024 to be a valid year');
+            assert(result.validYears.has(2025), 'Expected 2025 to be a valid year');
+            assert(result.validYears.size === 2, `Expected 2 valid years, got ${result.validYears.size}`);
+            
+            const avg = result.parsed.reduce((sum, r) => sum + r.p, 0) / result.parsed.length;
+            const expectedAvg = (31.53 + 48.00) / 2; // Average of the two years
+            assert(Math.abs(avg - expectedAvg) < 0.01, `Expected avg price ~${expectedAvg.toFixed(2)}, got ${avg.toFixed(2)}`);
+            
+            return { pass: true, message: '✓ Both complete years parsed correctly' };
+        }
+        
+        // Run all tests
+        function runTests() {
+            clearConsole();
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = '<h3>Running tests...</h3>';
+            
+            const tests = [
+                { name: 'Test 1: Single Complete Year', fn: test1_SingleCompleteYear },
+                { name: 'Test 2: Mixed Complete + Partial', fn: test2_MixedCompleteAndPartial },
+                { name: 'Test 3: Multiple Complete Years', fn: test3_MultipleCompleteYears }
+            ];
+            
+            const results = [];
+            let allPassed = true;
+            
+            for (const test of tests) {
+                try {
+                    const result = test.fn();
+                    results.push({
+                        name: test.name,
+                        pass: result.pass,
+                        message: result.message
+                    });
+                } catch (error) {
+                    allPassed = false;
+                    results.push({
+                        name: test.name,
+                        pass: false,
+                        message: `✗ FAILED: ${error.message}`
+                    });
+                    console.error(`Test failed: ${error.message}`);
+                }
+            }
+            
+            // Display results
+            let html = '<h3>Test Results Summary</h3>';
+            html += results.map(r => {
+                return `<div class="${r.pass ? 'pass' : 'fail'}">${r.name}: ${r.message}</div>`;
+            }).join('');
+            
+            const passCount = results.filter(r => r.pass).length;
+            html += `<br><div class="${allPassed ? 'pass' : 'fail'}">`;
+            html += `<strong>Tests passed: ${passCount}/${results.length}</strong>`;
+            html += '</div>';
+            
+            resultsDiv.innerHTML = html;
+            
+            console.log('\n========================================');
+            console.log(`ALL TESTS COMPLETE: ${passCount}/${results.length} passed`);
+            console.log('========================================');
+        }
+    </script>
+</body>
+</html>

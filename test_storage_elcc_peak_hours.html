@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Storage ELCC Multi-Peak-Hour Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f0f0f0;
+        }
+        .test-result {
+            background-color: white;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+            border-left: 5px solid #ccc;
+        }
+        .test-result.pass {
+            border-left-color: #4caf50;
+        }
+        .test-result.fail {
+            border-left-color: #f44336;
+        }
+        h1 {
+            color: #333;
+        }
+        pre {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border-radius: 3px;
+            overflow-x: auto;
+        }
+        .summary {
+            background-color: #e3f2fd;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>Storage ELCC Top Days Stress Window Test</h1>
+    <p>This test validates that the storage ELCC calculation uses a "Top Days" stress window approach:
+    find the 10 days with the highest peak load, then for each day average
+    <code>Math.min(installedCap, storageSOC[idx-1])</code> over a 6-hour window (3 hours before
+    the daily peak to 2 hours after). Final ELCC = (sumOfAvailablePower / 60) / installedCap.</p>
+
+    <div id="results"></div>
+
+    <script>
+        // Replicates the Top Days stress window storage ELCC logic from ETR_Dynamic_Cap_Expansion_Forecast_1.6.html
+        function calcStorageElcc(installedCap, loadOnly, storageSOC) {
+            if (installedCap === 0) return 0;
+            const totalHours = loadOnly.length;
+            const numDays = Math.ceil(totalHours / 24);
+            // For each day, find the peak load hour
+            const dailyPeaks = [];
+            for (let day = 0; day < numDays; day++) {
+                let peakLoad = -Infinity;
+                let peakHourIdx = day * 24;
+                for (let h = 0; h < 24; h++) {
+                    const hourIdx = day * 24 + h;
+                    if (hourIdx < totalHours && loadOnly[hourIdx] > peakLoad) {
+                        peakLoad = loadOnly[hourIdx];
+                        peakHourIdx = hourIdx;
+                    }
+                }
+                dailyPeaks.push({ peakLoad, peakHourIdx });
+            }
+            // Sort days by peak load descending and take the top 10
+            dailyPeaks.sort((a, b) => b.peakLoad - a.peakLoad);
+            const top10Days = dailyPeaks.slice(0, 10);
+            // For each top day, iterate over a 6-hour window: 3 hours before peak to 2 hours after
+            const stressWindowHours = 10 * 6; // 10 days × 6 hours
+            let sumOfAvailablePower = 0;
+            top10Days.forEach(({ peakHourIdx }) => {
+                for (let offset = -3; offset <= 2; offset++) {
+                    const hourIdx = peakHourIdx + offset;
+                    if (hourIdx >= 0 && hourIdx < totalHours) {
+                        const socBeforeHour = (storageSOC && hourIdx > 0) ? storageSOC[hourIdx - 1] : 0;
+                        sumOfAvailablePower += Math.min(installedCap, socBeforeHour);
+                    }
+                }
+            });
+            return Math.min(1, (sumOfAvailablePower / stressWindowHours) / installedCap);
+        }
+
+        // Build a full 8760-hour load array with controlled peaks on specific days
+        function buildLoadArray(peaksByDay) {
+            // peaksByDay: object mapping dayIndex → peak load value (all other hours = 100)
+            const load = new Array(8760).fill(100);
+            Object.entries(peaksByDay).forEach(([day, val]) => {
+                load[parseInt(day) * 24 + 12] = val; // place peak at noon of each day
+            });
+            return load;
+        }
+
+        function runTests() {
+            const results = [];
+
+            // Test 1: installedCap === 0 should return ELCC of 0
+            {
+                const testName = "Test 1: installedCap === 0 returns ELCC of 0";
+                const load = new Array(8760).fill(100);
+                const soc = new Array(8760).fill(50);
+                const elcc = calcStorageElcc(0, load, soc);
+                const pass = elcc === 0;
+                results.push({
+                    name: testName,
+                    pass,
+                    details: `installedCap=0\nExpected ELCC: 0\nActual ELCC: ${elcc}`
+                });
+            }
+
+            // Test 2: SOC always equals installedCap → ELCC should be 1.0
+            {
+                const testName = "Test 2: SOC always equals installedCap → ELCC = 1.0";
+                const installedCap = 100;
+                // Place peaks at noon of every day so no window hits the array boundary
+                const load = new Array(8760).fill(100);
+                for (let d = 0; d < 365; d++) load[d * 24 + 12] = 500;
+                const soc = new Array(8760).fill(installedCap);
+                const elcc = calcStorageElcc(installedCap, load, soc);
+                const pass = Math.abs(elcc - 1.0) < 1e-9;
+                results.push({
+                    name: testName,
+                    pass,
+                    details: `installedCap=${installedCap}, SOC uniformly full, peaks at noon\nExpected ELCC: 1.0\nActual ELCC: ${elcc}`
+                });
+            }
+
+            // Test 3: SOC always 0 → ELCC should be 0
+            {
+                const testName = "Test 3: SOC always 0 → ELCC = 0";
+                const installedCap = 200;
+                const load = new Array(8760).fill(300);
+                const soc = new Array(8760).fill(0);
+                const elcc = calcStorageElcc(installedCap, load, soc);
+                const pass = elcc === 0;
+                results.push({
+                    name: testName,
+                    pass,
+                    details: `installedCap=${installedCap}, SOC uniformly 0\nExpected ELCC: 0\nActual ELCC: ${elcc}`
+                });
+            }
+
+            // Test 4: Controlled peaks — verify top 10 days are selected and 6-hour window is used
+            {
+                const testName = "Test 4: Top 10 days selected and 6-hour window averaged";
+                const installedCap = 100;
+                // Place distinct peaks on days 0..12; days 0..9 have highest load (1000+day)
+                // Days 10..12 have lower load (500+day) and should NOT be selected
+                const peaksByDay = {};
+                for (let d = 0; d <= 12; d++) peaksByDay[d] = d < 10 ? 1000 + d : 500 + d;
+                const load = buildLoadArray(peaksByDay);
+                // Set SOC so that for each selected day's 6-hour window, SOC = 80 before each hour
+                // (peak is always at noon = hour 12 of the day; window covers hours 9–14)
+                const soc = new Array(8760).fill(0);
+                for (let d = 0; d < 10; d++) {
+                    for (let offset = -3; offset <= 2; offset++) {
+                        const hourIdx = d * 24 + 12 + offset;
+                        // socBeforeHour = soc[hourIdx - 1]
+                        if (hourIdx > 0) soc[hourIdx - 1] = 80;
+                    }
+                }
+                const elcc = calcStorageElcc(installedCap, load, soc);
+                // All 60 hours have availablePower = min(100, 80) = 80
+                const expected = (80 * 60 / 60) / installedCap; // = 0.8
+                const pass = Math.abs(elcc - expected) < 1e-9;
+                results.push({
+                    name: testName,
+                    pass,
+                    details: `installedCap=${installedCap}, SOC=80 in all 60 stress-window hours\n` +
+                             `Expected ELCC: ${expected.toFixed(6)}\nActual ELCC: ${elcc.toFixed(6)}`
+                });
+            }
+
+            // Test 5: Peak at hour 0 of day (window starts before hour 0) — boundary clamping
+            {
+                const testName = "Test 5: Peak at day-boundary (hour 0) — window clamped to valid hours";
+                const installedCap = 100;
+                // Day 0 peak is at hour 0 (start of array); window would be hours -3..2 → clamp to 0..2
+                // Days 1..9 have peaks at noon with high SOC
+                const load = new Array(8760).fill(100);
+                load[0] = 9999; // day 0 peak at hour 0
+                for (let d = 1; d < 10; d++) load[d * 24 + 12] = 9000 - d;
+                const soc = new Array(8760).fill(installedCap); // SOC = full everywhere
+                const elcc = calcStorageElcc(installedCap, load, soc);
+                // Day 0 window: hours -3,-2,-1 are out of bounds (3 hours skipped), hours 0,1,2 are valid
+                // hour 0: idx=0, socBeforeHour = 0 (no previous hour) → available = 0
+                // hours 1,2: soc[0]=100, soc[1]=100 → available = 100 each
+                // Days 1..9: 6 hours each, all soc=installedCap → available = 100 each (54 hours)
+                // sumOfAvailablePower = 0 + 100 + 100 + 54*100 = 5600
+                const expected = Math.min(1, (5600 / 60) / installedCap);
+                const pass = Math.abs(elcc - expected) < 1e-9;
+                results.push({
+                    name: testName,
+                    pass,
+                    details: `installedCap=${installedCap}, peak at hour 0\n` +
+                             `Expected ELCC: ${expected.toFixed(6)}\nActual ELCC: ${elcc.toFixed(6)}`
+                });
+            }
+
+            // Test 6: ELCC capped at 1.0 even when SOC greatly exceeds installedCap
+            {
+                const testName = "Test 6: ELCC never exceeds 1.0";
+                const installedCap = 50;
+                // Place peaks at noon of every day so no window hits the array boundary
+                const load = new Array(8760).fill(100);
+                for (let d = 0; d < 365; d++) load[d * 24 + 12] = 500;
+                const soc = new Array(8760).fill(9999); // SOC way above cap
+                const elcc = calcStorageElcc(installedCap, load, soc);
+                const pass = elcc === 1.0;
+                results.push({
+                    name: testName,
+                    pass,
+                    details: `installedCap=${installedCap}, SOC=9999 everywhere, peaks at noon\n` +
+                             `Expected ELCC: 1.0 (capped)\nActual ELCC: ${elcc}`
+                });
+            }
+
+            // Display results
+            const resultsDiv = document.getElementById('results');
+            const passCount = results.filter(r => r.pass).length;
+            const totalCount = results.length;
+
+            resultsDiv.innerHTML = `
+                <div class="summary">
+                    Test Results: ${passCount}/${totalCount} passed
+                    ${passCount === totalCount ? '✅ All tests passed!' : '❌ Some tests failed'}
+                </div>
+            `;
+
+            results.forEach(result => {
+                const resultDiv = document.createElement('div');
+                resultDiv.className = `test-result ${result.pass ? 'pass' : 'fail'}`;
+                resultDiv.innerHTML = `
+                    <h3>${result.pass ? '✅' : '❌'} ${result.name}</h3>
+                    <pre>${result.details}</pre>
+                `;
+                resultsDiv.appendChild(resultDiv);
+            });
+        }
+
+        window.addEventListener('load', runTests);
+    </script>
+</body>
+</html>

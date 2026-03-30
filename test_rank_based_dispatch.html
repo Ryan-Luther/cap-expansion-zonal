@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rank-Based Dispatch Logic Unit Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f0f0f0;
+        }
+        .test-result {
+            background-color: white;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+            border-left: 5px solid #ccc;
+        }
+        .test-result.pass {
+            border-left-color: #4caf50;
+        }
+        .test-result.fail {
+            border-left-color: #f44336;
+        }
+        h1 {
+            color: #333;
+        }
+        pre {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border-radius: 3px;
+            overflow-x: auto;
+        }
+    </style>
+</head>
+<body>
+    <h1>Rank-Based Dispatch Logic Unit Test</h1>
+    <p>This test validates the Zero-Allocation Rank-Based Dispatch algorithm logic.</p>
+    
+    <div id="results"></div>
+    
+    <script>
+        // Simulate the rank-based dispatch logic
+        function testRankBasedDispatch() {
+            const results = [];
+            
+            // Test 1: Battery should DISCHARGE when current price is among the best we have fuel for
+            // Scenario: 4-hour battery, 2 hours full, prices: [50, 100(now), 90, 80, 70, 60]
+            {
+                const trancheMW = 25; // 100MW / 4 tranches
+                const currentSoC_MWh = 50; // 2 hours worth (25MW * 2hr)
+                const storageDur = 4; // 4 hours
+                const RTE = 0.85;
+                
+                const hoursOfInventory = currentSoC_MWh / trancheMW; // = 2 hours
+                const trancheMaxEnergy = trancheMW * storageDur; // = 100 MWh
+                const hoursToFill = (trancheMaxEnergy - currentSoC_MWh) / (trancheMW * RTE); // = 50 / (25 * 0.85) = 2.35 hours
+                
+                // Price curve: current hour is 100, future 24 hours: [90, 80, 70, 60, 50, 40...]
+                const currentSignal = 100;
+                const futurePrices = [90, 80, 70, 60, 50, 40, 30, 20, 10, 5, 5, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 98];
+                
+                let betterSellOpps = 0;
+                for (let futureSignal of futurePrices) {
+                    if (futureSignal > currentSignal) {
+                        betterSellOpps++;
+                    }
+                }
+                
+                const shouldDischarge = betterSellOpps < hoursOfInventory && currentSoC_MWh > 0;
+                
+                results.push({
+                    name: "Test 1: Discharge at Peak",
+                    pass: shouldDischarge === true && betterSellOpps === 0,
+                    details: `hoursOfInventory=${hoursOfInventory}, betterSellOpps=${betterSellOpps}, shouldDischarge=${shouldDischarge}\nExpected: shouldDischarge=true (current price 100 is highest, no better opportunities)`
+                });
+            }
+            
+            // Test 2: Battery should NOT discharge when better opportunities exist
+            // Scenario: 4-hour battery, 1 hour full, prices: [60, 100(future), 110(future), 50, 40...]
+            {
+                const trancheMW = 25;
+                const currentSoC_MWh = 25; // 1 hour worth
+                const storageDur = 4;
+                const RTE = 0.85;
+                
+                const hoursOfInventory = currentSoC_MWh / trancheMW; // = 1 hour
+                
+                const currentSignal = 60;
+                const futurePrices = [100, 110, 50, 40, 30, 20, 10, 5, 5, 5, 10, 20, 30, 40, 50, 50, 50, 50, 50, 50, 50, 50, 50];
+                
+                let betterSellOpps = 0;
+                for (let futureSignal of futurePrices) {
+                    if (futureSignal > currentSignal) {
+                        betterSellOpps++;
+                    }
+                }
+                
+                const shouldDischarge = betterSellOpps < hoursOfInventory && currentSoC_MWh > 0;
+                
+                results.push({
+                    name: "Test 2: Wait for Better Peak",
+                    pass: shouldDischarge === false && betterSellOpps === 2,
+                    details: `hoursOfInventory=${hoursOfInventory}, betterSellOpps=${betterSellOpps}, shouldDischarge=${shouldDischarge}\nExpected: shouldDischarge=false (2 better opportunities exist, only 1 hour of fuel)`
+                });
+            }
+            
+            // Test 3: Battery should CHARGE at lowest prices
+            // Scenario: 4-hour battery, empty, prices: [10(now), 20, 30, 40, 50, 60, 70...]
+            {
+                const trancheMW = 25;
+                const currentSoC_MWh = 0; // empty
+                const storageDur = 4;
+                const RTE = 0.85;
+                const trancheMaxEnergy = trancheMW * storageDur;
+                
+                const hoursToFill = (trancheMaxEnergy - currentSoC_MWh) / (trancheMW * RTE); // = 100 / (25 * 0.85) = 4.7 hours
+                
+                const currentSignal = 10;
+                const futurePrices = [20, 30, 40, 50, 60, 70, 80, 90, 100, 100, 90, 80, 70, 60, 50, 40, 30, 20, 15, 12, 11, 10, 10];
+                
+                let betterBuyOpps = 0;
+                for (let futureSignal of futurePrices) {
+                    if (futureSignal < currentSignal) {
+                        betterBuyOpps++;
+                    }
+                }
+                
+                const shouldCharge = betterBuyOpps < hoursToFill && currentSoC_MWh < trancheMaxEnergy;
+                
+                results.push({
+                    name: "Test 3: Charge at Lowest Price",
+                    pass: shouldCharge === true && betterBuyOpps === 0,
+                    details: `hoursToFill=${hoursToFill}, betterBuyOpps=${betterBuyOpps}, shouldCharge=${shouldCharge}\nExpected: shouldCharge=true (current price 10 is lowest, no better opportunities)`
+                });
+            }
+            
+            // Test 4: Battery should NOT charge when better (lower) opportunities exist
+            // Scenario: 4-hour battery, mostly empty (1 hour), prices: [40(now), 30(future), 20(future), 10(future), 5(future), 50...]
+            {
+                const trancheMW = 25;
+                const currentSoC_MWh = 25; // 1 hour full
+                const storageDur = 4;
+                const RTE = 0.85;
+                const trancheMaxEnergy = trancheMW * storageDur;
+                
+                const hoursToFill = Math.floor((trancheMaxEnergy - currentSoC_MWh) / (trancheMW * RTE)); // = floor(75 / (25 * 0.85)) = 3 hours
+                
+                const currentSignal = 40;
+                const futurePrices = [30, 20, 10, 5, 50, 60, 70, 80, 90, 100, 100, 90, 80, 70, 60, 50, 45, 42, 41, 40, 40, 40, 40];
+                
+                let betterBuyOpps = 0;
+                for (let futureSignal of futurePrices) {
+                    if (futureSignal < currentSignal) {
+                        betterBuyOpps++;
+                    }
+                }
+                
+                const shouldCharge = betterBuyOpps < hoursToFill && currentSoC_MWh < trancheMaxEnergy;
+                
+                results.push({
+                    name: "Test 4: Wait for Lower Price to Charge",
+                    pass: shouldCharge === false && betterBuyOpps === 4,
+                    details: `hoursToFill=${hoursToFill}, betterBuyOpps=${betterBuyOpps}, shouldCharge=${shouldCharge}\nExpected: shouldCharge=false (4 better buy opportunities exist, need 3 hours of space)`
+                });
+            }
+            
+            // Test 5: Edge case - Empty battery, no cheaper prices ahead, should charge
+            {
+                const trancheMW = 25;
+                const currentSoC_MWh = 0;
+                const storageDur = 4;
+                const RTE = 0.85;
+                const trancheMaxEnergy = trancheMW * storageDur;
+                
+                const hoursToFill = Math.floor((trancheMaxEnergy - currentSoC_MWh) / (trancheMW * RTE));
+                
+                const currentSignal = 30;
+                const futurePrices = [35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100, 100, 95, 90, 85, 80, 75, 70, 65, 60];
+                
+                let betterBuyOpps = 0;
+                for (let futureSignal of futurePrices) {
+                    if (futureSignal < currentSignal) {
+                        betterBuyOpps++;
+                    }
+                }
+                
+                const shouldCharge = betterBuyOpps < hoursToFill && currentSoC_MWh < trancheMaxEnergy;
+                
+                results.push({
+                    name: "Test 5: Charge When No Better Opportunities",
+                    pass: shouldCharge === true && betterBuyOpps === 0,
+                    details: `hoursToFill=${hoursToFill}, betterBuyOpps=${betterBuyOpps}, shouldCharge=${shouldCharge}\nExpected: shouldCharge=true (current is cheapest in window)`
+                });
+            }
+            
+            // Test 6: Full battery should discharge at high price
+            {
+                const trancheMW = 25;
+                const currentSoC_MWh = 100; // Full (4 hours)
+                
+                const hoursOfInventory = currentSoC_MWh / trancheMW; // = 4 hours
+                
+                const currentSignal = 90;
+                const futurePrices = [85, 80, 75, 70, 65, 60, 55, 50, 45, 40, 35, 30, 25, 20, 15, 10, 5, 5, 10, 15, 20, 25, 30];
+                
+                let betterSellOpps = 0;
+                for (let futureSignal of futurePrices) {
+                    if (futureSignal > currentSignal) {
+                        betterSellOpps++;
+                    }
+                }
+                
+                const shouldDischarge = betterSellOpps < hoursOfInventory && currentSoC_MWh > 0;
+                
+                results.push({
+                    name: "Test 6: Full Battery Discharges at High Price",
+                    pass: shouldDischarge === true && betterSellOpps === 0,
+                    details: `hoursOfInventory=${hoursOfInventory}, betterSellOpps=${betterSellOpps}, shouldDischarge=${shouldDischarge}\nExpected: shouldDischarge=true (current is highest, 4 hours of fuel available)`
+                });
+            }
+            
+            // Test 7: 1-hour battery at 95% full should discharge (Rounding Bug Fix)
+            // This test validates the fix for the Math.floor() rounding bug
+            // Scenario: 1-hour battery, 95% full (0.95 hours), current price is peak
+            {
+                const trancheMW = 100; // 100MW battery
+                const storageDur = 1; // 1-hour battery
+                const trancheMaxEnergy = trancheMW * storageDur; // = 100 MWh
+                const currentSoC_MWh = 95; // 95% full = 0.95 hours worth (95 MWh out of 100 MWh)
+                const RTE = 0.85;
+                
+                const hoursOfInventory = currentSoC_MWh / trancheMW; // = 0.95 hours (was 0 with Math.floor)
+                
+                const currentSignal = 100;
+                const futurePrices = [90, 80, 70, 60, 50, 40, 30, 20, 10, 5, 5, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 85, 75];
+                
+                let betterSellOpps = 0;
+                for (let futureSignal of futurePrices) {
+                    if (futureSignal > currentSignal) {
+                        betterSellOpps++;
+                    }
+                }
+                
+                const shouldDischarge = betterSellOpps < hoursOfInventory && currentSoC_MWh > 0;
+                
+                results.push({
+                    name: "Test 7: 1-hour Battery at 95% Full Discharges (Rounding Bug Fix)",
+                    pass: shouldDischarge === true && betterSellOpps === 0 && hoursOfInventory === 0.95,
+                    details: `hoursOfInventory=${hoursOfInventory}, betterSellOpps=${betterSellOpps}, shouldDischarge=${shouldDischarge}\nExpected: shouldDischarge=true (0 < 0.95 is true, battery can discharge)\nWith Math.floor this would fail: hoursOfInventory=0, betterSellOpps=0, and 0 < 0 is false`
+                });
+            }
+            
+            return results;
+        }
+        
+        // Run tests and display results
+        const results = testRankBasedDispatch();
+        const resultsDiv = document.getElementById('results');
+        
+        results.forEach(result => {
+            const div = document.createElement('div');
+            div.className = `test-result ${result.pass ? 'pass' : 'fail'}`;
+            div.innerHTML = `<h3>${result.pass ? 'PASS' : 'FAIL'}: ${result.name}</h3><pre>${result.details}</pre>`;
+            resultsDiv.appendChild(div);
+        });
+        
+        const passed = results.filter(r => r.pass).length;
+        const total = results.length;
+        const summary = document.createElement('div');
+        summary.style.cssText = 'background-color: #e3f2fd; padding: 15px; margin: 20px 0; border-radius: 5px; font-weight: bold;';
+        summary.innerHTML = `Summary: ${passed}/${total} tests passed`;
+        resultsDiv.insertBefore(summary, resultsDiv.firstChild);
+        
+        console.log(`Unit Tests: ${passed}/${total} passed`);
+    </script>
+</body>
+</html>

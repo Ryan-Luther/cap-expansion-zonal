@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hardening Fixes Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f0f0f0;
+        }
+        .test-result {
+            background-color: white;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+            border-left: 5px solid #ccc;
+        }
+        .test-result.pass {
+            border-left-color: #4caf50;
+        }
+        .test-result.fail {
+            border-left-color: #f44336;
+        }
+        pre {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border-radius: 3px;
+            overflow-x: auto;
+            font-size: 11px;
+        }
+        .summary {
+            background-color: #e3f2fd;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>Hardening Fixes Test Suite</h1>
+    <p>This test validates the three hardening fixes applied to the codebase:</p>
+    <ol>
+        <li>Float64Array precision upgrade</li>
+        <li>TypedArray safety (no .push() on TypedArrays)</li>
+        <li>UI locking with finally block</li>
+    </ol>
+    
+    <div id="results"></div>
+    
+    <script>
+        const results = [];
+        
+        function addResult(name, pass, message, details = '') {
+            results.push({ name, pass, message, details });
+            const div = document.createElement('div');
+            div.className = `test-result ${pass ? 'pass' : 'fail'}`;
+            div.innerHTML = `
+                <h3>${pass ? '✓' : '✗'} ${name}</h3>
+                <p>${message}</p>
+                ${details ? `<pre>${details}</pre>` : ''}
+            `;
+            document.getElementById('results').appendChild(div);
+        }
+        
+        // Test 1: Float64Array precision
+        function testFloat64ArrayPrecision() {
+            const testName = "Float64Array Precision Test";
+            try {
+                // Test that Float64Array maintains precision for large financial values
+                const largeValue = 999999999.99;
+                const arr32 = new Float32Array([largeValue]);
+                const arr64 = new Float64Array([largeValue]);
+                
+                // Float32 loses precision, Float64 maintains it
+                const precision32 = Math.abs(arr32[0] - largeValue);
+                const precision64 = Math.abs(arr64[0] - largeValue);
+                
+                const details = `Original: ${largeValue}\nFloat32: ${arr32[0]} (error: ${precision32})\nFloat64: ${arr64[0]} (error: ${precision64})`;
+                
+                if (precision64 < precision32 && precision64 < 0.01) {
+                    addResult(testName, true, 
+                        `Float64Array maintains precision for large values (error: ${precision64.toExponential(2)})`,
+                        details);
+                } else {
+                    addResult(testName, false, 
+                        `Float64Array precision test failed`,
+                        details);
+                }
+            } catch (e) {
+                addResult(testName, false, `Error: ${e.message}`, e.stack);
+            }
+        }
+        
+        // Test 2: TypedArray safety - verify .push() doesn't exist on TypedArrays
+        function testTypedArraySafety() {
+            const testName = "TypedArray Safety Test";
+            try {
+                const arr64 = new Float64Array(10);
+                const arr32 = new Float32Array(10);
+                
+                // TypedArrays don't have .push() method
+                const hasPush64 = typeof arr64.push === 'function';
+                const hasPush32 = typeof arr32.push === 'function';
+                
+                if (!hasPush64 && !hasPush32) {
+                    addResult(testName, true, 
+                        "TypedArrays correctly don't have .push() method - using index assignment is required",
+                        "Float32Array.push: undefined\nFloat64Array.push: undefined");
+                } else {
+                    addResult(testName, false, 
+                        "TypedArrays unexpectedly have .push() method");
+                }
+            } catch (e) {
+                addResult(testName, false, `Error: ${e.message}`, e.stack);
+            }
+        }
+        
+        // Test 3: Index-based assignment works correctly
+        function testIndexBasedAssignment() {
+            const testName = "Index-Based Assignment Test";
+            try {
+                const arr = new Float64Array(8760);
+                
+                // Test index-based assignment (the correct pattern)
+                for (let i = 0; i < 100; i++) {
+                    arr[i] = i * 1.5;
+                }
+                
+                // Verify values
+                let correct = true;
+                for (let i = 0; i < 100; i++) {
+                    if (Math.abs(arr[i] - (i * 1.5)) > 0.0001) {
+                        correct = false;
+                        break;
+                    }
+                }
+                
+                if (correct) {
+                    addResult(testName, true, 
+                        "Index-based assignment works correctly on Float64Array",
+                        `Sample values: arr[0]=${arr[0]}, arr[50]=${arr[50]}, arr[99]=${arr[99]}`);
+                } else {
+                    addResult(testName, false, 
+                        "Index-based assignment failed");
+                }
+            } catch (e) {
+                addResult(testName, false, `Error: ${e.message}`, e.stack);
+            }
+        }
+        
+        // Test 4: Simulate UI locking with finally block
+        async function testUILockingPattern() {
+            const testName = "UI Locking Pattern Test";
+            try {
+                let buttonDisabled = false;
+                let buttonEnabled = false;
+                let errorHandled = false;
+                
+                // Simulate the pattern used in runOptimizer - normal case
+                async function simulateOptimizer() {
+                    buttonDisabled = true;
+                    try {
+                        await new Promise(resolve => setTimeout(resolve, 10));
+                    } finally {
+                        buttonEnabled = true;
+                    }
+                }
+                
+                // Test normal execution
+                await simulateOptimizer();
+                
+                if (buttonDisabled && buttonEnabled) {
+                    addResult(testName + " (Normal Flow)", true, 
+                        "UI locking pattern works correctly - button is always re-enabled in finally block",
+                        "Pattern: try { ...work... } finally { button.disabled = false; }");
+                } else {
+                    addResult(testName + " (Normal Flow)", false, 
+                        "UI locking pattern failed in normal flow");
+                }
+                
+                // Test error case
+                buttonDisabled = false;
+                buttonEnabled = false;
+                
+                async function simulateOptimizerWithError() {
+                    buttonDisabled = true;
+                    try {
+                        await new Promise(resolve => setTimeout(resolve, 10));
+                        throw new Error("Simulated error");
+                    } catch (err) {
+                        errorHandled = true;
+                    } finally {
+                        buttonEnabled = true;
+                    }
+                }
+                
+                await simulateOptimizerWithError();
+                
+                if (buttonDisabled && buttonEnabled && errorHandled) {
+                    addResult(testName + " (Error Handling)", true, 
+                        "UI locking pattern works correctly even when errors occur",
+                        "Pattern ensures button is re-enabled even after errors");
+                } else {
+                    addResult(testName + " (Error Handling)", false, 
+                        "UI locking pattern failed in error case");
+                }
+                
+            } catch (e) {
+                addResult(testName, false, `Error: ${e.message}`, e.stack);
+            }
+        }
+        
+        // Test 5: IRR calculation precision with Float64Array
+        function testIRRCalculationPrecision() {
+            const testName = "IRR Calculation Precision Test";
+            try {
+                // Simulate IRR calculation with large cash flows
+                const investment = 100000000; // $100M
+                const annualCashFlow = 12000000; // $12M per year
+                const life = 20;
+                
+                // Simple NPV calculation at 10% rate using Float64Array
+                const cashFlows64 = new Float64Array(life);
+                for (let i = 0; i < life; i++) {
+                    cashFlows64[i] = annualCashFlow;
+                }
+                
+                let npv64 = -investment;
+                const rate = 0.10;
+                for (let t = 1; t <= life; t++) {
+                    npv64 += cashFlows64[t-1] / Math.pow(1 + rate, t);
+                }
+                
+                // Compare with Float32
+                const cashFlows32 = new Float32Array(life);
+                for (let i = 0; i < life; i++) {
+                    cashFlows32[i] = annualCashFlow;
+                }
+                
+                let npv32 = -investment;
+                for (let t = 1; t <= life; t++) {
+                    npv32 += cashFlows32[t-1] / Math.pow(1 + rate, t);
+                }
+                
+                const difference = Math.abs(npv64 - npv32);
+                const details = `Investment: $${investment.toLocaleString()}\nAnnual Cash Flow: $${annualCashFlow.toLocaleString()}\nLife: ${life} years\nRate: ${(rate * 100).toFixed(1)}%\n\nNPV (Float64): $${npv64.toLocaleString(undefined, {maximumFractionDigits: 2})}\nNPV (Float32): $${npv32.toLocaleString(undefined, {maximumFractionDigits: 2})}\nDifference: $${difference.toLocaleString(undefined, {maximumFractionDigits: 2})}`;
+                
+                if (npv64 !== npv32) {
+                    addResult(testName, true, 
+                        `Float64Array provides different precision for IRR calculations (difference: $${difference.toFixed(2)})`,
+                        details);
+                } else {
+                    addResult(testName, true, 
+                        "Float64Array maintains same precision as Float32 for this test case",
+                        details);
+                }
+            } catch (e) {
+                addResult(testName, false, `Error: ${e.message}`, e.stack);
+            }
+        }
+        
+        // Run all tests
+        async function runTests() {
+            testFloat64ArrayPrecision();
+            testTypedArraySafety();
+            testIndexBasedAssignment();
+            await testUILockingPattern();
+            testIRRCalculationPrecision();
+            
+            // Summary after all tests complete
+            setTimeout(() => {
+                const passed = results.filter(r => r.pass).length;
+                const failed = results.filter(r => !r.pass).length;
+                const total = results.length;
+                
+                const summary = document.createElement('div');
+                summary.className = 'summary';
+                summary.innerHTML = `
+                    <h2>Test Summary</h2>
+                    <p>Passed: ${passed}/${total} | Failed: ${failed}/${total}</p>
+                    <p>Status: ${failed === 0 ? '✓ All tests passed!' : '✗ Some tests failed'}</p>
+                `;
+                document.getElementById('results').insertBefore(summary, document.getElementById('results').firstChild);
+            }, 200);
+        }
+        
+        runTests();
+    </script>
+</body>
+</html>

@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Storage SOC Timing Example</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 40px;
+            background-color: #f5f5f5;
+            line-height: 1.6;
+        }
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #2c3e50;
+            border-bottom: 3px solid #3498db;
+            padding-bottom: 10px;
+        }
+        h2 {
+            color: #34495e;
+            margin-top: 30px;
+        }
+        h3 {
+            color: #7f8c8d;
+            margin-top: 20px;
+        }
+        .highlight {
+            background-color: #fff3cd;
+            padding: 15px;
+            border-left: 4px solid #ffc107;
+            margin: 20px 0;
+        }
+        .correct {
+            background-color: #d4edda;
+            padding: 15px;
+            border-left: 4px solid #28a745;
+            margin: 20px 0;
+        }
+        .incorrect {
+            background-color: #f8d7da;
+            padding: 15px;
+            border-left: 4px solid #dc3545;
+            margin: 20px 0;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 12px;
+            text-align: left;
+        }
+        th {
+            background-color: #3498db;
+            color: white;
+        }
+        tr:nth-child(even) {
+            background-color: #f2f2f2;
+        }
+        tr.peak-hour {
+            background-color: #ffffcc !important;
+            font-weight: bold;
+        }
+        code {
+            background-color: #f4f4f4;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: monospace;
+        }
+        pre {
+            background-color: #2c3e50;
+            color: #ecf0f1;
+            padding: 15px;
+            border-radius: 5px;
+            overflow-x: auto;
+        }
+        .formula {
+            background-color: #e8f4f8;
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
+            font-family: monospace;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Storage SOC Timing in Peak Reserve Margin Calculation</h1>
+        
+        <div class="highlight">
+            <strong>Key Issue:</strong> When calculating unused storage capacity at the peak hour, 
+            it matters whether we use the State of Charge (SOC) <em>before</em> or <em>after</em> 
+            discharge during that hour.
+        </div>
+
+        <h2>How Storage SOC is Tracked in the Model</h2>
+        
+        <p>In the code, <code>storageSOC[i]</code> represents the State of Charge at the <strong>END</strong> 
+        of hour <code>i</code> (after any charging or discharging during that hour).</p>
+        
+        <pre>
+// From the code (lines 7400-7426)
+for (let i = 0; i < 8760; i++) {
+    const storageAction = hourlyGeneration['Storage'][i];
+    // Positive = discharge, Negative = charge
+    
+    if (storageAction < 0) {
+        // Charging: energy stored = charge amount * RTE
+        currentSOC -= storageAction * conf.storageRTE;
+    } else {
+        // Discharging: energy removed directly
+        currentSOC -= storageAction;
+    }
+    
+    currentSOC = Math.max(0, Math.min(maxStorageEnergy, currentSOC));
+    <strong>storageSOC[i] = currentSOC;  // SOC at END of hour i</strong>
+}
+        </pre>
+
+        <h2>Concrete Example</h2>
+        
+        <h3>System Configuration</h3>
+        <ul>
+            <li><strong>Storage Power Capacity:</strong> 200 MW</li>
+            <li><strong>Storage Duration:</strong> 4 hours</li>
+            <li><strong>Storage Energy Capacity:</strong> 200 MW × 4 hr = 800 MWh</li>
+            <li><strong>Round-Trip Efficiency:</strong> 85%</li>
+            <li><strong>Peak Load Hour:</strong> Hour 15</li>
+            <li><strong>Peak Load:</strong> 1,000 MW</li>
+        </ul>
+
+        <h3>Hour-by-Hour Storage Operation</h3>
+        
+        <table>
+            <thead>
+                <tr>
+                    <th>Hour</th>
+                    <th>Action</th>
+                    <th>Generation (MW)</th>
+                    <th>SOC Start (MWh)</th>
+                    <th>SOC End (MWh)</th>
+                    <th>Available Capacity (MW)</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>13</td>
+                    <td>Charge</td>
+                    <td>-150</td>
+                    <td>200</td>
+                    <td>327.5</td>
+                    <td>min(200, 200) = 200</td>
+                </tr>
+                <tr>
+                    <td>14</td>
+                    <td>Charge</td>
+                    <td>-100</td>
+                    <td>327.5</td>
+                    <td>412.5</td>
+                    <td>min(200, 327.5) = 200</td>
+                </tr>
+                <tr class="peak-hour">
+                    <td>15 (PEAK)</td>
+                    <td>Discharge</td>
+                    <td>+150</td>
+                    <td>412.5</td>
+                    <td>262.5</td>
+                    <td>min(200, 412.5) = 200</td>
+                </tr>
+                <tr>
+                    <td>16</td>
+                    <td>Discharge</td>
+                    <td>+100</td>
+                    <td>262.5</td>
+                    <td>162.5</td>
+                    <td>min(200, 262.5) = 200</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="highlight">
+            <strong>Note:</strong> In the model:
+            <ul>
+                <li><code>storageSOC[14]</code> = 412.5 MWh (end of hour 14 = start of hour 15)</li>
+                <li><code>storageSOC[15]</code> = 262.5 MWh (end of hour 15 = after discharge)</li>
+            </ul>
+        </div>
+
+        <h2>The Problem with Using Wrong SOC</h2>
+
+        <div class="incorrect">
+            <h3>❌ INCORRECT: Using SOC After Discharge</h3>
+            
+            <div class="formula">
+const storageSOC = modelResults.storageSOC[15];  // = 262.5 MWh (AFTER discharge)
+const storageCap = 200;  // MW
+available = Math.min(storageCap, storageSOC);  // = min(200, 262.5) = 200 MW
+
+const storageGen = 150;  // MW discharged
+unused = available - storageGen;  // = 200 - 150 = 50 MW
+            </div>
+            
+            <p><strong>Why this seems okay but is conceptually wrong:</strong></p>
+            <ul>
+                <li>We're using the SOC <em>after</em> the discharge happened</li>
+                <li>The available capacity should be based on what was available <em>before</em> taking action</li>
+                <li>In this case, we got lucky because the min() capped at 200 MW anyway</li>
+                <li>But in edge cases (see below), this breaks completely</li>
+            </ul>
+        </div>
+
+        <div class="correct">
+            <h3>✅ CORRECT: Using SOC Before Discharge</h3>
+            
+            <div class="formula">
+// SOC at beginning of peak hour = SOC at end of previous hour
+const socBeforePeak = modelResults.storageSOC[14];  // = 412.5 MWh (BEFORE discharge)
+const storageCap = 200;  // MW
+available = Math.min(storageCap, socBeforePeak);  // = min(200, 412.5) = 200 MW
+
+const storageGen = 150;  // MW discharged
+unused = available - storageGen;  // = 200 - 150 = 50 MW
+            </div>
+            
+            <p><strong>Why this is correct:</strong></p>
+            <ul>
+                <li>We're using the SOC at the <em>beginning</em> of the hour</li>
+                <li>This represents what was actually available to dispatch</li>
+                <li>The unused capacity is what we could have dispatched but didn't</li>
+            </ul>
+        </div>
+
+        <h2>Critical Edge Case: Fully Depleted Battery</h2>
+
+        <p>Consider this scenario where the storage fully discharges at the peak hour:</p>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Hour</th>
+                    <th>Generation (MW)</th>
+                    <th>SOC Start (MWh)</th>
+                    <th>SOC End (MWh)</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>15</td>
+                    <td>+150</td>
+                    <td>412.5</td>
+                    <td>262.5</td>
+                </tr>
+                <tr class="peak-hour">
+                    <td>16 (PEAK)</td>
+                    <td>+200</td>
+                    <td>262.5</td>
+                    <td>62.5</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <div class="incorrect">
+            <h3>❌ Using SOC After Discharge (WRONG)</h3>
+            <div class="formula">
+available = min(200, 62.5) = 62.5 MW  ← WRONG!
+discharged = 200 MW
+unused = 62.5 - 200 = -137.5 MW  ← NONSENSE! Negative unused capacity!
+            </div>
+        </div>
+
+        <div class="correct">
+            <h3>✅ Using SOC Before Discharge (CORRECT)</h3>
+            <div class="formula">
+available = min(200, 262.5) = 200 MW  ← Correct!
+discharged = 200 MW
+unused = 200 - 200 = 0 MW  ← Correct! Battery fully utilized
+            </div>
+        </div>
+
+        <h2>The Fix</h2>
+
+        <p>The corrected code uses <code>storageSOC[peakLoadHour - 1]</code> to get the SOC at the 
+        beginning of the peak hour (which is the end of the previous hour):</p>
+
+        <pre>
+// CORRECTED CODE:
+if (tech.id === 'storage') {
+    // Use SOC at beginning of peak hour (end of previous hour)
+    const socBeforePeak = (modelResults.storageSOC && peakLoadHour > 0) 
+        ? modelResults.storageSOC[peakLoadHour - 1] 
+        : 0;  // If peak is hour 0, battery starts empty
+    
+    const storageCap = installedCapacities['storage'] || 0;
+    availableDispatchableAtPeak += Math.min(storageCap, socBeforePeak);
+    
+    const storageGen = modelResults.hourlyGeneration['Storage'][peakLoadHour];
+    actualDispatchAtPeak += Math.max(0, storageGen);
+}
+        </pre>
+
+        <h2>Summary</h2>
+
+        <div class="correct">
+            <p><strong>Key Takeaways:</strong></p>
+            <ol>
+                <li><code>storageSOC[i]</code> = SOC at <strong>end</strong> of hour i (after charging/discharging)</li>
+                <li>To get available capacity at hour i, use <code>storageSOC[i-1]</code> (SOC at beginning)</li>
+                <li>Available capacity = what you <em>could have</em> used before taking action</li>
+                <li>Unused capacity = available - actually dispatched</li>
+                <li>Using post-discharge SOC can lead to nonsensical negative unused capacity</li>
+            </ol>
+        </div>
+
+        <div class="highlight">
+            <p><strong>Reserve Margin Interpretation:</strong></p>
+            <p>The reserve margin measures the operating headroom you had at the critical hour. 
+            It answers the question: "How much more could we have dispatched if needed?" 
+            This requires knowing what was available <em>before</em> you dispatched, not after.</p>
+        </div>
+    </div>
+</body>
+</html>

@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Year Fallback Fix Test Suite</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f0f0f0;
+        }
+        .test-result {
+            background-color: white;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+            border-left: 5px solid #ccc;
+        }
+        .test-result.pass {
+            border-left-color: #4caf50;
+        }
+        .test-result.fail {
+            border-left-color: #f44336;
+        }
+        .test-result.warn {
+            border-left-color: #ff9800;
+        }
+        pre {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border-radius: 3px;
+            overflow-x: auto;
+            font-size: 11px;
+        }
+        .summary {
+            background-color: #e3f2fd;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+        h3 {
+            margin-top: 0;
+        }
+        .console-log {
+            background-color: #263238;
+            color: #aed581;
+            padding: 10px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            margin-top: 10px;
+        }
+        .console-error {
+            color: #ef5350;
+        }
+        .console-warn {
+            color: #ffb74d;
+        }
+    </style>
+</head>
+<body>
+    <h1>Year Fallback Fix Test Suite</h1>
+    <p>This test validates that the calibrator correctly falls back to the most recent complete year when the requested year is incomplete.</p>
+    
+    <div id="results"></div>
+    
+    <script>
+        // Mock global variables that would normally be present
+        let rawHistoricalData = null;
+        let selectedZone = null;
+        
+        // Utility to normalize column names
+        function normalizeColumnName(name) {
+            return name.toLowerCase().trim().replace(/\s+/g, '');
+        }
+        
+        // Mock detectCompleteHistoricalYears function
+        function detectCompleteHistoricalYears(historicalData) {
+            if (!historicalData || historicalData.length === 0) {
+                return null;
+            }
+            
+            // Find date column
+            const firstRow = historicalData[0];
+            const columns = Object.keys(firstRow);
+            let dateColumn = null;
+            
+            for (const col of columns) {
+                const normalized = normalizeColumnName(col);
+                if (['snapshots', 'date', 'datetime', 'timestamp'].includes(normalized)) {
+                    dateColumn = col;
+                    break;
+                }
+            }
+            
+            if (!dateColumn) {
+                return null;
+            }
+            
+            // Count hours per year
+            const yearCounts = {};
+            for (const row of historicalData) {
+                const dateStr = row[dateColumn];
+                if (dateStr && dateStr.length >= 4) {
+                    const year = parseInt(dateStr.substring(0, 4));
+                    if (!isNaN(year) && year >= 2000 && year <= 2100) {
+                        yearCounts[year] = (yearCounts[year] || 0) + 1;
+                    }
+                }
+            }
+            
+            // Identify complete years (8760 hours)
+            const completeYears = [];
+            for (const [year, count] of Object.entries(yearCounts)) {
+                if (count === 8760) {
+                    completeYears.push(parseInt(year));
+                }
+            }
+            
+            return {
+                completeYears: completeYears.sort(),
+                yearCounts
+            };
+        }
+        
+        // Mock extractHistoricalPricesByYear function
+        function extractHistoricalPricesByYear(targetYear) {
+            if (!rawHistoricalData || !rawHistoricalData.data || !selectedZone) {
+                return null;
+            }
+            
+            const data = rawHistoricalData.data;
+            const firstRow = data[0];
+            const columns = Object.keys(firstRow);
+            
+            // Find date column
+            let dateColumn = null;
+            for (const col of columns) {
+                const normalized = normalizeColumnName(col);
+                if (['snapshots', 'date', 'datetime', 'timestamp'].includes(normalized)) {
+                    dateColumn = col;
+                    break;
+                }
+            }
+            
+            if (!dateColumn) {
+                return null;
+            }
+            
+            // Extract year-specific data
+            const yearData = [];
+            for (const row of data) {
+                const dateStr = row[dateColumn];
+                if (dateStr && dateStr.length >= 4) {
+                    const year = parseInt(dateStr.substring(0, 4));
+                    if (!isNaN(year) && year === targetYear) {
+                        yearData.push(parseFloat(row.Price) || 0);
+                    }
+                }
+            }
+            
+            return yearData;
+        }
+        
+        // Mock FundamentalCalibrator._getYearFilteredPrices method (the fixed version)
+        function _getYearFilteredPrices(actualPrices, currentYear) {
+            // Check if we have historical data
+            if (!rawHistoricalData || !rawHistoricalData.data) {
+                console.error('No historical data available');
+                return null;
+            }
+            
+            // Check if this year has complete historical data
+            const yearInfo = detectCompleteHistoricalYears(rawHistoricalData.data);
+            if (!yearInfo || !yearInfo.completeYears || yearInfo.completeYears.length === 0) {
+                console.error('No complete historical years found');
+                return null;
+            }
+            
+            let yearToUse = currentYear;
+            let yearFilteredPrices = null;
+            
+            // Check if requested year has complete data
+            if (yearInfo.completeYears.includes(currentYear)) {
+                yearFilteredPrices = extractHistoricalPricesByYear(currentYear);
+                if (!yearFilteredPrices || yearFilteredPrices.length === 0) {
+                    console.error(`Failed to extract data for year ${currentYear}`);
+                    return null;
+                }
+                console.log(`Using historical metrics from year ${currentYear} (${yearFilteredPrices.length} hours)`);
+            } else {
+                // Use most recent complete year as fallback
+                const mostRecentCompleteYear = Math.max(...yearInfo.completeYears);
+                yearToUse = mostRecentCompleteYear;
+                yearFilteredPrices = extractHistoricalPricesByYear(yearToUse);
+                if (!yearFilteredPrices || yearFilteredPrices.length === 0) {
+                    console.error(`Failed to extract data for fallback year ${yearToUse}`);
+                    return null;
+                }
+                console.warn(`Year ${currentYear} not complete in historical data`);
+                console.log(`Using most recent complete year (${yearToUse}) for calibration metrics (${yearFilteredPrices.length} hours)`);
+            }
+            
+            return yearFilteredPrices;
+        }
+        
+        // Test helper functions
+        function createMockHistoricalData(years) {
+            // Create mock data for specified years
+            // years is an object like { 2024: 8760, 2025: 7968 }
+            const data = [];
+            
+            for (const [year, hours] of Object.entries(years)) {
+                const startDate = new Date(parseInt(year), 0, 1, 0, 0, 0); // Jan 1 at midnight
+                
+                for (let i = 0; i < hours; i++) {
+                    const currentDate = new Date(startDate);
+                    currentDate.setHours(startDate.getHours() + i);
+                    
+                    const month = String(currentDate.getMonth() + 1).padStart(2, '0');
+                    const day = String(currentDate.getDate()).padStart(2, '0');
+                    const hour = String(currentDate.getHours()).padStart(2, '0');
+                    
+                    data.push({
+                        Date: `${year}-${month}-${day} ${hour}`,
+                        Price: parseFloat(year) === 2024 ? 31.53 : 35.00 // Different prices for each year
+                    });
+                }
+            }
+            
+            return data;
+        }
+        
+        // Test Suite
+        const tests = [];
+        
+        // Test 1: Complete Year (2024)
+        tests.push({
+            name: 'Test 1: Complete Year (2024)',
+            run: () => {
+                const consoleLogs = [];
+                const originalLog = console.log;
+                const originalWarn = console.warn;
+                console.log = (...args) => { consoleLogs.push({ type: 'log', msg: args.join(' ') }); originalLog(...args); };
+                console.warn = (...args) => { consoleLogs.push({ type: 'warn', msg: args.join(' ') }); originalWarn(...args); };
+                
+                try {
+                    // Setup mock data with complete 2024 year
+                    rawHistoricalData = {
+                        data: createMockHistoricalData({ 2024: 8760 })
+                    };
+                    selectedZone = { iso: 'ERCOT', zone: 'HOUSTON' };
+                    
+                    // Test with complete year 2024
+                    const result = _getYearFilteredPrices([], 2024);
+                    
+                    console.log = originalLog;
+                    console.warn = originalWarn;
+                    
+                    // Verify results
+                    if (!result) {
+                        return { 
+                            pass: false, 
+                            message: 'Expected result array, got null',
+                            consoleLogs 
+                        };
+                    }
+                    
+                    if (result.length !== 8760) {
+                        return { 
+                            pass: false, 
+                            message: `Expected 8760 hours, got ${result.length}`,
+                            consoleLogs 
+                        };
+                    }
+                    
+                    // Check if correct year was used
+                    const hasCorrectLog = consoleLogs.some(log => 
+                        log.msg.includes('Using historical metrics from year 2024')
+                    );
+                    
+                    if (!hasCorrectLog) {
+                        return { 
+                            pass: false, 
+                            message: 'Expected log message about using year 2024',
+                            consoleLogs 
+                        };
+                    }
+                    
+                    // Should NOT have warning about incomplete data
+                    const hasWarning = consoleLogs.some(log => 
+                        log.type === 'warn' && log.msg.includes('not complete')
+                    );
+                    
+                    if (hasWarning) {
+                        return { 
+                            pass: false, 
+                            message: 'Should not warn about incomplete data for complete year',
+                            consoleLogs 
+                        };
+                    }
+                    
+                    return { 
+                        pass: true, 
+                        message: 'Complete year 2024 correctly used without fallback',
+                        consoleLogs 
+                    };
+                } finally {
+                    console.log = originalLog;
+                    console.warn = originalWarn;
+                }
+            }
+        });
+        
+        // Test 2: Incomplete Year (2025) - Should fallback to 2024
+        tests.push({
+            name: 'Test 2: Incomplete Year (2025) - Should fallback to 2024',
+            run: () => {
+                const consoleLogs = [];
+                const originalLog = console.log;
+                const originalWarn = console.warn;
+                console.log = (...args) => { consoleLogs.push({ type: 'log', msg: args.join(' ') }); originalLog(...args); };
+                console.warn = (...args) => { consoleLogs.push({ type: 'warn', msg: args.join(' ') }); originalWarn(...args); };
+                
+                try {
+                    // Setup mock data with complete 2024 and incomplete 2025
+                    rawHistoricalData = {
+                        data: createMockHistoricalData({ 2024: 8760, 2025: 7968 })
+                    };
+                    selectedZone = { iso: 'ERCOT', zone: 'HOUSTON' };
+                    
+                    // Test with incomplete year 2025
+                    const result = _getYearFilteredPrices([], 2025);
+                    
+                    console.log = originalLog;
+                    console.warn = originalWarn;
+                    
+                    // Verify results
+                    if (!result) {
+                        return { 
+                            pass: false, 
+                            message: 'Expected result array, got null',
+                            consoleLogs 
+                        };
+                    }
+                    
+                    if (result.length !== 8760) {
+                        return { 
+                            pass: false, 
+                            message: `Expected 8760 hours (from 2024), got ${result.length}`,
+                            consoleLogs 
+                        };
+                    }
+                    
+                    // Check if warning about incomplete year was issued
+                    const hasIncompleteWarning = consoleLogs.some(log => 
+                        log.type === 'warn' && log.msg.includes('Year 2025 not complete')
+                    );
+                    
+                    if (!hasIncompleteWarning) {
+                        return { 
+                            pass: false, 
+                            message: 'Expected warning about year 2025 being incomplete',
+                            consoleLogs 
+                        };
+                    }
+                    
+                    // Check if fallback to 2024 was logged
+                    const hasFallbackLog = consoleLogs.some(log => 
+                        log.msg.includes('Using most recent complete year (2024)')
+                    );
+                    
+                    if (!hasFallbackLog) {
+                        return { 
+                            pass: false, 
+                            message: 'Expected log message about using fallback year 2024',
+                            consoleLogs 
+                        };
+                    }
+                    
+                    return { 
+                        pass: true, 
+                        message: 'Incomplete year 2025 correctly falls back to complete year 2024',
+                        consoleLogs 
+                    };
+                } finally {
+                    console.log = originalLog;
+                    console.warn = originalWarn;
+                }
+            }
+        });
+        
+        // Test 3: No Historical Data
+        tests.push({
+            name: 'Test 3: No Historical Data - Should return null',
+            run: () => {
+                const consoleLogs = [];
+                const originalLog = console.log;
+                const originalWarn = console.warn;
+                const originalError = console.error;
+                console.log = (...args) => { consoleLogs.push({ type: 'log', msg: args.join(' ') }); originalLog(...args); };
+                console.warn = (...args) => { consoleLogs.push({ type: 'warn', msg: args.join(' ') }); originalWarn(...args); };
+                console.error = (...args) => { consoleLogs.push({ type: 'error', msg: args.join(' ') }); originalError(...args); };
+                
+                try {
+                    // Setup with no historical data
+                    rawHistoricalData = null;
+                    selectedZone = { iso: 'ERCOT', zone: 'HOUSTON' };
+                    
+                    const result = _getYearFilteredPrices([], 2024);
+                    
+                    console.log = originalLog;
+                    console.warn = originalWarn;
+                    console.error = originalError;
+                    
+                    if (result !== null) {
+                        return { 
+                            pass: false, 
+                            message: 'Expected null when no historical data, got result',
+                            consoleLogs 
+                        };
+                    }
+                    
+                    const hasErrorLog = consoleLogs.some(log => 
+                        log.type === 'error' && log.msg.includes('No historical data')
+                    );
+                    
+                    if (!hasErrorLog) {
+                        return { 
+                            pass: false, 
+                            message: 'Expected error log about missing historical data',
+                            consoleLogs 
+                        };
+                    }
+                    
+                    return { 
+                        pass: true, 
+                        message: 'Correctly returns null when no historical data available',
+                        consoleLogs 
+                    };
+                } finally {
+                    console.log = originalLog;
+                    console.warn = originalWarn;
+                    console.error = originalError;
+                }
+            }
+        });
+        
+        // Test 4: Multiple Complete Years - Should use most recent
+        tests.push({
+            name: 'Test 4: Multiple Complete Years - Fallback to most recent',
+            run: () => {
+                const consoleLogs = [];
+                const originalLog = console.log;
+                const originalWarn = console.warn;
+                console.log = (...args) => { consoleLogs.push({ type: 'log', msg: args.join(' ') }); originalLog(...args); };
+                console.warn = (...args) => { consoleLogs.push({ type: 'warn', msg: args.join(' ') }); originalWarn(...args); };
+                
+                try {
+                    // Setup mock data with complete 2022, 2023, 2024 and incomplete 2025
+                    rawHistoricalData = {
+                        data: createMockHistoricalData({ 2022: 8760, 2023: 8760, 2024: 8760, 2025: 100 })
+                    };
+                    selectedZone = { iso: 'ERCOT', zone: 'HOUSTON' };
+                    
+                    // Test with incomplete year 2025
+                    const result = _getYearFilteredPrices([], 2025);
+                    
+                    console.log = originalLog;
+                    console.warn = originalWarn;
+                    
+                    if (!result) {
+                        return { 
+                            pass: false, 
+                            message: 'Expected result array, got null',
+                            consoleLogs 
+                        };
+                    }
+                    
+                    // Check if fallback to 2024 (most recent) was logged
+                    const hasFallbackLog = consoleLogs.some(log => 
+                        log.msg.includes('Using most recent complete year (2024)')
+                    );
+                    
+                    if (!hasFallbackLog) {
+                        return { 
+                            pass: false, 
+                            message: 'Expected fallback to most recent complete year (2024), not 2022 or 2023',
+                            consoleLogs 
+                        };
+                    }
+                    
+                    return { 
+                        pass: true, 
+                        message: 'Correctly uses most recent complete year (2024) when 2025 is incomplete',
+                        consoleLogs 
+                    };
+                } finally {
+                    console.log = originalLog;
+                    console.warn = originalWarn;
+                }
+            }
+        });
+        
+        // Run all tests
+        function runTests() {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = '';
+            
+            let passCount = 0;
+            let failCount = 0;
+            
+            tests.forEach(test => {
+                const result = test.run();
+                
+                if (result.pass) {
+                    passCount++;
+                } else {
+                    failCount++;
+                }
+                
+                const resultDiv = document.createElement('div');
+                resultDiv.className = `test-result ${result.pass ? 'pass' : 'fail'}`;
+                
+                let html = `<h3>${test.name}</h3>`;
+                html += `<p><strong>Status:</strong> ${result.pass ? '✓ PASS' : '✗ FAIL'}</p>`;
+                html += `<p><strong>Message:</strong> ${result.message}</p>`;
+                
+                if (result.consoleLogs && result.consoleLogs.length > 0) {
+                    html += '<p><strong>Console Output:</strong></p>';
+                    html += '<div class="console-log">';
+                    result.consoleLogs.forEach(log => {
+                        const className = log.type === 'error' ? 'console-error' : log.type === 'warn' ? 'console-warn' : '';
+                        html += `<div class="${className}">[${log.type.toUpperCase()}] ${log.msg}</div>`;
+                    });
+                    html += '</div>';
+                }
+                
+                resultDiv.innerHTML = html;
+                resultsDiv.appendChild(resultDiv);
+            });
+            
+            // Add summary
+            const summaryDiv = document.createElement('div');
+            summaryDiv.className = 'summary';
+            summaryDiv.innerHTML = `
+                <h3>Test Summary</h3>
+                <p>Total: ${tests.length} | Passed: ${passCount} | Failed: ${failCount}</p>
+                <p>${failCount === 0 ? '✓ All tests passed!' : '✗ Some tests failed'}</p>
+            `;
+            resultsDiv.insertBefore(summaryDiv, resultsDiv.firstChild);
+        }
+        
+        // Run tests on page load
+        window.addEventListener('load', runTests);
+    </script>
+</body>
+</html>
