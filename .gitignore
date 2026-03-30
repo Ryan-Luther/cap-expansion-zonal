@@ -21,3 +21,9 @@ test_adam_optimizer.html
 .DS_Store
 Thumbs.db
 test_price_metrics_fix.html
+
+
+
+# Allow test input data
+!Test Input Data/
+!Test Input Data/*.csv
