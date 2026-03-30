@@ -27,3 +27,8 @@ test_price_metrics_fix.html
 # Allow test input data
 !Test Input Data/
 !Test Input Data/*.csv
+!Test Input Data - Zonal/
+!Test Input Data - Zonal/*.csv
+process_installed_capacity.js
+reformat_load.js
+reshape_cf.js
