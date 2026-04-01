@@ -1,0 +1,2 @@
+Test[[:space:]]Input[[:space:]]Data[[:space:]]-[[:space:]]Zonal/Load_Zonal.csv filter=lfs diff=lfs merge=lfs -text
+Test[[:space:]]Input[[:space:]]Data[[:space:]]-[[:space:]]Zonal/capacity_factors_zonal.csv filter=lfs diff=lfs merge=lfs -text
