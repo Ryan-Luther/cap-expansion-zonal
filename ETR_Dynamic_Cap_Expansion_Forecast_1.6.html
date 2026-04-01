@@ -8400,22 +8400,15 @@ self.onmessage = async function(e) {
                         try { updateDispatchChart(dr.netLoad, dr.netLoadAfterStorage || dr.netLoad, drPrices); } catch(e) { console.warn('Zonal dispatch chart:', e.message); }
                         try { updateMonthlyMixChart(drGen); } catch(e) { console.warn('Zonal monthly chart:', e.message); }
                         try { updateDiurnalMixChart(drGen, drPrices, dr.hourlyPrices || drPrices, historicalPrices); } catch(e) { console.warn('Zonal diurnal chart:', e.message); }
-                        // Dispatch curve: for aggregate, merge all zones' stacks; for single zone use its stack
+                        // Dispatch curve: for aggregate, concatenate all zones' stacks preserving individual assets
                         try {
                             let dispStack = dr.fullDispatchStack;
                             if (!dispStack && selectedDisplayZone === 'aggregate') {
-                                // Merge all zone dispatch stacks into one aggregate
-                                const allStacks = [];
+                                dispStack = [];
                                 Object.values(multiResult.zonalResults).forEach(zr => {
-                                    if (zr.fullDispatchStack) zr.fullDispatchStack.forEach(a => allStacks.push({...a}));
+                                    if (zr.fullDispatchStack) zr.fullDispatchStack.forEach(a => dispStack.push({...a}));
                                 });
-                                // Aggregate by asset type
-                                const byType = {};
-                                allStacks.forEach(a => {
-                                    if (!byType[a.Asset_Type]) byType[a.Asset_Type] = {...a, Capacity_MW: 0};
-                                    byType[a.Asset_Type].Capacity_MW += a.Capacity_MW;
-                                });
-                                dispStack = Object.values(byType).sort((a,b) => a.cost - b.cost);
+                                dispStack.sort((a, b) => a.cost - b.cost);
                             }
                             if (dispStack) updateDispatchCurveChart(dispStack);
                         } catch(e) { console.warn('Zonal dispatch curve:', e.message); }
