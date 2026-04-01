@@ -2949,13 +2949,110 @@
                     });
                 }
                 
+                // ZONAL: Check if this ISO is zonal
+                const isZonalIso = zoneRegistry[iso]?.isZonal;
+
                 // Run model or optimizer
                 if (shouldSkipOptimization) {
                     await runModel();
                 } else {
-                    await runOptimizer();
+                    if (isZonalIso) {
+                        // For zonal ISOs, run the multi-zone optimizer
+                        // First rebuild zonal data for this year
+                        rebuildZonalHourlyData(iso);
+                        updateSystemFromProjectDBZonal(iso, year);
+
+                        // Apply previous year's per-zone capacities if available
+                        if (prevYearCapacities?._zonalCapacities) {
+                            const zones = zoneRegistry[iso].zones;
+                            zones.forEach(zone => {
+                                if (prevYearCapacities._zonalCapacities[zone]) {
+                                    const yearRetirements = (retirementsByYearIsoTech[iso] && retirementsByYearIsoTech[iso][year]) || {};
+                                    const zoneCapPrev = prevYearCapacities._zonalCapacities[zone];
+
+                                    if (!zonalData[zone]) zonalData[zone] = {};
+                                    zonalData[zone].installedCapacities = {};
+
+                                    Object.entries(zoneCapPrev).forEach(([techId, capVal]) => {
+                                        const retiredMW = yearRetirements[techId] || 0;
+                                        zonalData[zone].installedCapacities[techId] = Math.max(0, capVal - retiredMW);
+                                    });
+                                    zonalData[zone].etrCapacities = { ...zonalData[zone].installedCapacities };
+                                }
+                            });
+                        }
+
+                        // Build conf from DOM
+                        const gasEl = document.getElementById('gas-fuel-cost');
+                        const txMarginInput = document.getElementById('tx-margin-input');
+                        const gasCcgtTech = generationTypes.find(t => t.id === 'new-gas-ccgt');
+                        const conf = {
+                            gasCost: parseFloat(gasEl?.value || 3.5),
+                            bidMargin: parseFloat(document.getElementById('bid-margin')?.value || 25),
+                            storageDur: parseFloat(document.getElementById('storage-duration')?.value || 2),
+                            storageRTE: parseFloat(document.getElementById('storage-rte')?.value || 85) / 100,
+                            impSlope: parseFloat(document.getElementById('import-slope')?.value || 0.8),
+                            impInt: parseFloat(document.getElementById('import-intercept')?.value || 0),
+                            txMargin: txMarginInput ? parseFloat(txMarginInput.value) : 15.0,
+                            txSuppression: parseFloat(document.getElementById('tx-suppression')?.value || 1),
+                            prmTarget: (parseFloat(document.getElementById('prm-target')?.value) || 15) / 100,
+                            rpsTarget: (parseFloat(document.getElementById('rps-target')?.value) || 40) / 100,
+                            capPriceCap: parseFloat(document.getElementById('cap-price-cap')?.value) || 800,
+                            capPriceFloor: parseFloat(document.getElementById('cap-price-floor')?.value) || 0,
+                            capRmThreshold: parseFloat(document.getElementById('cap-rm-threshold')?.value) || 15,
+                            floorRmThreshold: parseFloat(document.getElementById('floor-rm-threshold')?.value) || 40,
+                            recAcp: parseFloat(document.getElementById('rec-acp')?.value) || 50,
+                            recFloor: parseFloat(document.getElementById('rec-floor')?.value) || 1,
+                            recCapThreshold: (parseFloat(document.getElementById('rec-cap-threshold')?.value) || 75) / 100,
+                            recFloorThreshold: (parseFloat(document.getElementById('rec-floor-threshold')?.value) || 100) / 100,
+                            energyPriceCap: parseFloat(document.getElementById('energy-price-cap')?.value) || 5000,
+                            elccPeakHours: parseInt(document.getElementById('elcc-peak-hours')?.value) || 100,
+                            gasCapex: parseFloat(document.getElementById('capex-new-gas-ccgt')?.value) || (gasCcgtTech?.capex ?? 1200),
+                            gasOpex: parseFloat(document.getElementById('opex-new-gas-ccgt')?.value) || (gasCcgtTech?.opex ?? 1000)
+                        };
+
+                        // Build optimizer params from DOM
+                        const optimizerParams = {
+                            hurdleRates: {},
+                            annualCaps: {},
+                            techFinancialParams: {},
+                            scheduledBuilds: {},
+                            sliderMins: {},
+                            sliderMaxs: {},
+                            sensitivity: parseFloat(document.getElementById('optimizer-sensitivity')?.value) || 0.5,
+                            reliabilitySignalWeight: parseFloat(document.getElementById('reliability-signal-weight')?.value) || 0.3,
+                            prmTarget: conf.prmTarget,
+                            dailyGasPricesData,
+                            historicalAvgPrice,
+                            userElccOverrides,
+                            csvHardcodedElcc,
+                            currentTaxCredits
+                        };
+
+                        generationTypes.forEach(tech => {
+                            const hurdleEl = document.getElementById(`hurdle-${tech.id}`);
+                            const annCapEl = document.getElementById(`ann-cap-${tech.id}`);
+                            const capexEl = document.getElementById(`capex-${tech.id}`);
+                            const opexEl = document.getElementById(`opex-${tech.id}`);
+                            optimizerParams.hurdleRates[tech.id] = parseFloat(hurdleEl?.value) || 8;
+                            optimizerParams.annualCaps[tech.id] = parseFloat(annCapEl?.value) || 0;
+                            optimizerParams.techFinancialParams[tech.id] = {
+                                capex: parseFloat(capexEl?.value) || tech.capex || 1000,
+                                opex: parseFloat(opexEl?.value) || tech.opex || 500,
+                                life: tech.life || 20
+                            };
+                            optimizerParams.scheduledBuilds[tech.id] = getScheduledBuilds(iso, year, tech.id);
+                            const slider = document.getElementById(`${tech.id}-slider`);
+                            optimizerParams.sliderMins[tech.id] = parseFloat(slider?.min) || 0;
+                            optimizerParams.sliderMaxs[tech.id] = parseFloat(slider?.max) || 999999;
+                        });
+
+                        await runMultiZoneOptimizer(iso, conf, optimizerParams);
+                    } else {
+                        await runOptimizer();
+                    }
                 }
-                
+
                 // Restore saved retirements after optimization
                 if (savedYearData && savedYearData.capacities) {
                     ['coal', 'existing-gas'].forEach(techId => {
@@ -2969,11 +3066,11 @@
                         }
                     });
                 }
-                
+
                 // Save the year (skip persistence, notifications, and chart updates during batch process)
                 await saveCurrentYear({ skipPersistence: true, skipNotification: true, skipCharts: true });
-                
-                // Collect ending capacities
+
+                // Collect ending capacities (ISO-aggregate)
                 const endingCapacities = {};
                 generationTypes.forEach(tech => {
                     const slider = document.getElementById(`${tech.id}-slider`);
@@ -2981,7 +3078,18 @@
                         endingCapacities[tech.id] = parseInt(slider.value);
                     }
                 });
-                
+
+                // ZONAL: Also collect per-zone ending capacities for carry-forward
+                if (isZonalIso) {
+                    endingCapacities._zonalCapacities = {};
+                    const zones = zoneRegistry[iso].zones;
+                    zones.forEach(zone => {
+                        if (zonalData[zone]?.installedCapacities) {
+                            endingCapacities._zonalCapacities[zone] = { ...zonalData[zone].installedCapacities };
+                        }
+                    });
+                }
+
                 // Notify worker that year is complete
                 simulationWorker.postMessage({
                     type: 'year_completed',
@@ -5299,8 +5407,15 @@
             // Update Tech/Dispatch from DB first if available
             if(projectDatabase) {
                 updateSystemFromProjectDB(iso, year);
+                // ZONAL: Also partition into per-zone data if zonal ISO
+                if (zoneRegistry[iso]?.isZonal) {
+                    updateSystemFromProjectDBZonal(iso, year);
+                }
             }
-            
+
+            // ZONAL: Update zone selector when ISO changes
+            updateZoneSelector();
+
             // Get retirements for this year (calculated in updateSystemFromProjectDB)
             const yearRetirements = (retirementsByYearIsoTech[iso] && retirementsByYearIsoTech[iso][year]) 
                 ? retirementsByYearIsoTech[iso][year] 
@@ -5413,6 +5528,21 @@
                 }
             });
             
+            // ZONAL: Restore per-zone capacities from saved data
+            if (zoneRegistry[iso]?.isZonal) {
+                const savedZonalCaps = currentYearSavedData?.zonalCapacities;
+                if (savedZonalCaps) {
+                    zoneRegistry[iso].zones.forEach(zone => {
+                        if (savedZonalCaps[zone]) {
+                            if (!zonalData[zone]) zonalData[zone] = {};
+                            zonalData[zone].installedCapacities = { ...savedZonalCaps[zone] };
+                            zonalData[zone].etrCapacities = { ...savedZonalCaps[zone] };
+                        }
+                    });
+                    console.log(`Restored zonal capacities from saved data for ${iso} ${year}`);
+                }
+            }
+
             // Handle ELCC overrides when loading saved data
             // Clear any existing ELCC overrides first
             clearElccOverrides();
@@ -7256,6 +7386,35 @@
                 elccOverrides: elccOverrides,  // Track which ELCCs are user overrides
                 irr: irrValues
             };
+
+            // ZONAL: Save per-zone capacities alongside ISO-aggregate
+            if (zoneRegistry[iso]?.isZonal) {
+                const zones = zoneRegistry[iso].zones;
+                savedData[iso][year].zonalCapacities = {};
+                zones.forEach(zone => {
+                    if (zonalData[zone]?.installedCapacities) {
+                        savedData[iso][year].zonalCapacities[zone] = { ...zonalData[zone].installedCapacities };
+                    }
+                });
+
+                // Also save zonal results summary if available
+                if (Object.keys(cachedZonalResults).length > 0) {
+                    savedData[iso][year].zonalMetrics = {};
+                    zones.forEach(zone => {
+                        const zr = cachedZonalResults[zone];
+                        if (zr) {
+                            const prices = zr.finalPrices || zr.hourlyPrices || [];
+                            const avgPrice = prices.length > 0 ? Array.from(prices).reduce((a, b) => a + b, 0) / prices.length : 0;
+                            savedData[iso][year].zonalMetrics[zone] = {
+                                avgPrice,
+                                prm: zr.marketMetrics?.prm ?? 0,
+                                peakLoad: zr.netLoad ? Math.max(...Array.from(zr.netLoad)) : 0,
+                                totalCapacity: Object.values(zr.installedCapacities || {}).reduce((a, b) => a + b, 0)
+                            };
+                        }
+                    });
+                }
+            }
             
             // Persist to localStorage only if NOT skipping
             if (!options.skipPersistence) {
