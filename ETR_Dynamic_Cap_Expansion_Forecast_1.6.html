@@ -4961,7 +4961,21 @@ self.onmessage = async function(e) {
                 const hoursNeeded = Math.min(loadRows.length, 8760);
 
                 // Get zone-specific CF data
-                const zoneCfData = rawGenDataZonal[zone] || [];
+                // First try wide-format zonal data, then fall back to long-format rawGenData filtered by zone
+                let zoneCfData = rawGenDataZonal[zone] || [];
+                if (zoneCfData.length === 0 && rawGenData && rawGenData.length > 0) {
+                    // Filter long-format CF data for this zone (ISO column matches zone name)
+                    zoneCfData = rawGenData
+                        .filter(r => r.ISO === zone)
+                        .map(r => ({ Hour: parseInt(r.Hour), Technology: r.Technology, Capacity_Factor: parseFloat(r.Capacity_Factor) }));
+                }
+                // If still empty, try ISO-level CFs as fallback (same profile for all zones)
+                if (zoneCfData.length === 0 && rawGenData && rawGenData.length > 0) {
+                    const isoName = zone.split('_')[0]; // NYISO_A -> NYISO
+                    zoneCfData = rawGenData
+                        .filter(r => r.ISO === isoName || r.ISO === iso)
+                        .map(r => ({ Hour: parseInt(r.Hour), Technology: r.Technology, Capacity_Factor: parseFloat(r.Capacity_Factor) }));
+                }
                 // Group CF data by hour for quick lookup
                 const cfByHour = {};
                 zoneCfData.forEach(row => {
