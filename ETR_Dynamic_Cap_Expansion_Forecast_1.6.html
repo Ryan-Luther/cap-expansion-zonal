@@ -173,6 +173,11 @@
             <select id="yearSelector" name="yearSelector" aria-label="Select Year" class="prism-select bg-prism-input text-white text-xs border border-prism-border rounded px-3 py-1.5 focus:outline-none focus:border-prism-green disabled:opacity-50" disabled>
                 <option value="">Year...</option>
             </select>
+            <div class="zone-selector-wrapper hidden">
+                <select id="zoneSelector" name="zoneSelector" aria-label="Select Zone" class="prism-select bg-prism-input text-prism-blue text-xs border border-prism-blue/30 rounded px-3 py-1.5 focus:outline-none focus:border-prism-blue disabled:opacity-50" disabled>
+                    <option value="">N/A</option>
+                </select>
+            </div>
         </div>
         
         <button id="resetDefaults" class="prism-btn py-1.5 px-4 text-xs whitespace-nowrap">Reset Defaults</button>
@@ -690,6 +695,17 @@
         let csvHardcodedElcc = {}; // { techId: elccPercentage (0-100) } - hardcoded ELCC values from CSV input file, used when CSV column has a value
         let techAnnualCapRatios = {}; // { techId: ratio (0-1) } - technology-specific annual capacity build limit ratios from CSV
         let techCostCurveDistribution = {}; // { techId: percentage (0-100) } - Technology Cost Curve Distribution (%) for scaling capex in IRR calculation, defaults to 20%
+
+        // ============================================================
+        // ZONAL MODEL GLOBALS
+        // ============================================================
+        let zoneRegistry = {};          // { ISO: { zones: ['WEST_AZPS', ...], isZonal: true/false } }
+        let zonalData = {};             // { zoneName: { hourlyData, dispatchAssets, etrCapacities, installedCapacities, hourlyGasPrices, calibrator, baseScalars } }
+        let transferLimits = [];        // [{ from, to, maxMW, slope, intercept, txCapex }] from zone_transfer_limits.csv
+        let cachedZonalResults = {};    // { zoneName: { hourlyPrices, hourlyGeneration, ... } } for zone selector switching
+        let rawGenDataZonal = {};       // { zoneName: [{ Hour, Technology, CF }, ...] } - zonal capacity factor data (wide format)
+        const MAX_TRANSFER_ITERS = 5;   // Max iterations for inter-zonal transfer convergence
+        const TRANSFER_CONVERGENCE_THRESHOLD = 2.0; // $/MWh max price change to declare convergence
 
         // DOM Element Cache - speeds up updateFinancialTable by avoiding repeated document.getElementById calls
         let uiCache = {};
@@ -2227,12 +2243,15 @@
         // Returns a scalar to multiply with the annual gas price from market assumptions
         // The scaling is: (daily_price_for_zone / annual_avg_for_zone)
         // This makes the average gas price over the year equal to the market assumptions value
-        function getDailyGasPriceScalar(hourIdx) {
+        function getDailyGasPriceScalar(hourIdx, zoneOverride) {
             if (!dailyGasPricesData) return 1.0; // No daily gas prices uploaded, use uniform price
-            
-            // Get the zone column name based on selected zone
+
+            // ZONAL: If zone override provided, use it directly as the column name
             let zoneColumn = null;
-            if (selectedZone) {
+            if (zoneOverride && dailyGasPricesData.zoneColumns?.includes(zoneOverride)) {
+                zoneColumn = zoneOverride;
+            }
+            else if (selectedZone) {
                 // The zone column format is ISO_ZONE (e.g., "CAISO_NP15", "ERCOT_COAST")
                 zoneColumn = `${selectedZone.iso}_${selectedZone.zone}`;
                 // Check if this exact column exists
@@ -2291,10 +2310,10 @@
          * @param {number} baseGasCost - Base gas cost from config
          * @returns {Float64Array} - Array of 8760 hourly gas prices
          */
-        function preCalculateHourlyGasPrices(baseGasCost) {
+        function preCalculateHourlyGasPrices(baseGasCost, zoneOverride) {
             const hourlyGasPrices = new Float64Array(8760);
             for (let i = 0; i < 8760; i++) {
-                hourlyGasPrices[i] = baseGasCost * getDailyGasPriceScalar(i);
+                hourlyGasPrices[i] = baseGasCost * getDailyGasPriceScalar(i, zoneOverride);
             }
             return hourlyGasPrices;
         }
@@ -3748,6 +3767,10 @@
                             else if (fileHeaders.includes('ISO') && fileHeaders.includes('Year') && fileHeaders.includes('Capex ($/kW)')) fileType = 'assumptions';
                             else if (fileHeaders.includes('ENVProjectID') && fileHeaders.includes('ProjectName') && fileHeaders.includes('ISOTerritory')) fileType = 'project_db';
                             else if (fileHeaders.includes('DayOfYear') && fileHeaders.some(h => /^[A-Z]+_[A-Z0-9]+$/.test(h))) fileType = 'daily_gas_prices';
+                            // ZONAL: Detect zone transfer limits CSV
+                            else if (fileHeaders.includes('Zone_From') && fileHeaders.includes('Zone_To') && fileHeaders.includes('MaxTransfer_MW')) fileType = 'zone_transfer_limits';
+                            // ZONAL: Detect wide-format capacity factors (Hour + Tech_Zone columns)
+                            else if (fileHeaders.includes('Hour') && !fileHeaders.includes('ISO') && !fileHeaders.includes('Capacity_Factor') && fileHeaders.some(h => /^[A-Za-z\s]+_(CAISO|ERCOT|ISONE|MISO|NYISO|PJM|SE|SPP|WEST)/.test(h))) fileType = 'capacity_factor_zonal';
                         }
                         
                         // Accumulate row data
@@ -3770,6 +3793,8 @@
                             if (fileType === 'assumptions') processMarketAssumptionsData(accumulatedData, fileHeaders);
                             if (fileType === 'project_db') processProjectDbData(accumulatedData, fileHeaders);
                             if (fileType === 'daily_gas_prices') await processDailyGasPricesData(accumulatedData, fileHeaders);
+                            if (fileType === 'zone_transfer_limits') processZoneTransferLimitsData(accumulatedData, fileHeaders);
+                            if (fileType === 'capacity_factor_zonal') processCapacityFactorZonalData(accumulatedData, fileHeaders);
                         } else {
                             addFeedback(file.name, 'Unknown CSV headers', false);
                         }
@@ -4408,6 +4433,390 @@
             showNotification(`Loaded Assumptions: ${Object.keys(marketAssumptions).length} ISOs`);
         }
 
+        // ============================================================
+        // ZONAL: Zone Transfer Limits Parser
+        // ============================================================
+        function processZoneTransferLimitsData(data, fields) {
+            transferLimits = data.map(row => ({
+                from: (row.Zone_From || '').trim(),
+                to: (row.Zone_To || '').trim(),
+                maxMW: parseFloat(row.MaxTransfer_MW) || 0,
+                slope: parseFloat(row.Slope) || 0.8,
+                intercept: parseFloat(row.Intercept) || 0,
+                txCapex: parseFloat(row.Tx_Capex_per_MW) || 500
+            })).filter(r => r.from && r.to && r.maxMW > 0);
+            showNotification(`Zone Transfer Limits: ${transferLimits.length} corridors loaded`);
+        }
+
+        // ============================================================
+        // ZONAL: Capacity Factor Parser (wide format: Hour, Tech_Zone, ...)
+        // ============================================================
+        function processCapacityFactorZonalData(data, fields) {
+            // Column headers are like: "Hour", "Biomass_CAISO", "Solar_WEST_AZPS", "Onshore Wind_WEST_BPAT"
+            // Parse into rawGenDataZonal keyed by zone
+            rawGenDataZonal = {};
+            const techZoneCols = fields.filter(f => f !== 'Hour');
+
+            // Parse column headers to extract {technology, zone} pairs
+            // Technology names can have spaces (e.g., "Onshore Wind"), zone is the last part after last underscore
+            // BUT zones like WEST_AZPS have underscores too. Strategy: known ISO prefixes.
+            const knownIsoPrefixes = ['CAISO', 'ERCOT', 'ISONE', 'MISO', 'NYISO', 'PJM', 'SE', 'SPP', 'WEST'];
+
+            const colMappings = []; // [{ col, tech, zone }]
+            techZoneCols.forEach(col => {
+                // Try to find the split point: last occurrence of _ISOPREFIX
+                let bestSplit = -1;
+                let bestZone = '';
+                for (const prefix of knownIsoPrefixes) {
+                    const idx = col.indexOf('_' + prefix);
+                    if (idx >= 0) {
+                        const zone = col.substring(idx + 1); // e.g., "WEST_AZPS" or "CAISO"
+                        const tech = col.substring(0, idx);   // e.g., "Biomass" or "Onshore Wind"
+                        if (tech && zone) {
+                            // Prefer the earliest match (longest tech name)
+                            if (bestSplit === -1 || idx > bestSplit) {
+                                bestSplit = idx;
+                                bestZone = zone;
+                            }
+                        }
+                    }
+                }
+
+                if (bestSplit >= 0) {
+                    const tech = col.substring(0, bestSplit);
+                    colMappings.push({ col, tech, zone: bestZone });
+                }
+            });
+
+            // Group columns by zone
+            const zoneColMap = {}; // { zone: [{ col, tech }] }
+            colMappings.forEach(m => {
+                if (!zoneColMap[m.zone]) zoneColMap[m.zone] = [];
+                zoneColMap[m.zone].push({ col: m.col, tech: m.tech });
+            });
+
+            // Build rawGenDataZonal: for each zone, create array of {Hour, Technology, Capacity_Factor}
+            const zones = Object.keys(zoneColMap);
+            zones.forEach(zone => {
+                rawGenDataZonal[zone] = [];
+            });
+
+            data.forEach(row => {
+                const hour = parseInt(row.Hour);
+                if (isNaN(hour)) return;
+
+                zones.forEach(zone => {
+                    zoneColMap[zone].forEach(({ col, tech }) => {
+                        const cf = parseFloat(row[col]);
+                        if (!isNaN(cf)) {
+                            rawGenDataZonal[zone].push({
+                                Hour: hour,
+                                Technology: tech,
+                                Capacity_Factor: cf
+                            });
+                        }
+                    });
+                });
+            });
+
+            // Also synthesize ISO-aggregate rawGenData for backward compatibility
+            // Group zones by parent ISO and average CFs
+            const isoZones = {}; // { ISO: [zone1, zone2, ...] }
+            zones.forEach(zone => {
+                const iso = getParentIso(zone);
+                if (!isoZones[iso]) isoZones[iso] = [];
+                isoZones[iso].push(zone);
+            });
+
+            // Build rawGenData in the original long format: { ISO, Hour, Technology, Capacity_Factor }
+            rawGenData = [];
+            Object.entries(isoZones).forEach(([iso, isoZoneList]) => {
+                // Get all techs from first zone
+                const techs = [...new Set(zoneColMap[isoZoneList[0]]?.map(c => c.tech) || [])];
+                const hourCount = data.length;
+
+                for (let h = 0; h < hourCount; h++) {
+                    const hour = parseInt(data[h].Hour);
+                    if (isNaN(hour)) continue;
+
+                    techs.forEach(tech => {
+                        // Average CF across zones for this ISO
+                        let sum = 0, count = 0;
+                        isoZoneList.forEach(zone => {
+                            const col = zoneColMap[zone]?.find(c => c.tech === tech)?.col;
+                            if (col) {
+                                const cf = parseFloat(data[h][col]);
+                                if (!isNaN(cf)) { sum += cf; count++; }
+                            }
+                        });
+
+                        if (count > 0) {
+                            rawGenData.push({
+                                ISO: iso,
+                                Hour: hour,
+                                Technology: tech,
+                                Capacity_Factor: sum / count
+                            });
+                        }
+                    });
+                }
+            });
+
+            showNotification(`Zonal CFs: ${zones.length} zones, ${colMappings.length} tech-zone profiles`);
+            updateDropdowns();
+            rebuildHourlyData();
+        }
+
+        // ============================================================
+        // ZONAL: Helper - Get parent ISO from zone name
+        // ============================================================
+        function getParentIso(zoneName) {
+            const knownIsos = ['CAISO', 'ERCOT', 'ISONE', 'MISO', 'NYISO', 'PJM', 'SE', 'SPP', 'WEST'];
+            for (const iso of knownIsos) {
+                if (zoneName === iso || zoneName.startsWith(iso + '_')) return iso;
+            }
+            return zoneName; // fallback: zone IS the ISO
+        }
+
+        // ============================================================
+        // ZONAL: Build Zone Registry from loaded data
+        // ============================================================
+        function buildZoneRegistry() {
+            zoneRegistry = {};
+
+            // Scan Load.csv column headers for zone patterns
+            if (rawLoadData && rawLoadData.length > 0) {
+                const loadCols = Object.keys(rawLoadData[0]).filter(k => k !== 'Year' && k !== 'Date UTC' && k.trim() !== '');
+                const knownIsos = ['CAISO', 'ERCOT', 'ISONE', 'MISO', 'NYISO', 'PJM', 'SE', 'SPP', 'WEST'];
+
+                // Group columns by parent ISO
+                const isoZoneMap = {}; // { ISO: Set of zone names }
+                loadCols.forEach(col => {
+                    const parentIso = getParentIso(col);
+                    if (!isoZoneMap[parentIso]) isoZoneMap[parentIso] = new Set();
+                    isoZoneMap[parentIso].add(col);
+                });
+
+                // Determine if ISO is zonal (has sub-zone columns beyond the ISO itself)
+                Object.entries(isoZoneMap).forEach(([iso, zonesSet]) => {
+                    const zones = Array.from(zonesSet).sort();
+                    const hasSubZones = zones.some(z => z !== iso && z.startsWith(iso + '_'));
+
+                    if (hasSubZones) {
+                        // Only include sub-zones (not the ISO-level column itself if it exists)
+                        const subZones = zones.filter(z => z.startsWith(iso + '_'));
+                        zoneRegistry[iso] = { zones: subZones, isZonal: true };
+                    } else {
+                        zoneRegistry[iso] = { zones: [iso], isZonal: false };
+                    }
+                });
+            }
+
+            // Also check rawGenDataZonal for zones not in load data
+            if (Object.keys(rawGenDataZonal).length > 0) {
+                Object.keys(rawGenDataZonal).forEach(zone => {
+                    const iso = getParentIso(zone);
+                    if (!zoneRegistry[iso]) {
+                        zoneRegistry[iso] = { zones: [], isZonal: false };
+                    }
+                    if (zone !== iso && zone.startsWith(iso + '_')) {
+                        if (!zoneRegistry[iso].zones.includes(zone)) {
+                            zoneRegistry[iso].zones.push(zone);
+                        }
+                        zoneRegistry[iso].isZonal = true;
+                    }
+                });
+            }
+
+            const zonalIsos = Object.entries(zoneRegistry).filter(([_, v]) => v.isZonal).map(([k, v]) => `${k}(${v.zones.length})`);
+            if (zonalIsos.length > 0) {
+                console.log(`Zone Registry: ${zonalIsos.join(', ')}`);
+            }
+        }
+
+        // ============================================================
+        // ZONAL: Rebuild Zonal Hourly Data for all zones in an ISO
+        // ============================================================
+        function rebuildZonalHourlyData(iso) {
+            if (!zoneRegistry[iso]?.isZonal) return;
+
+            const year = document.getElementById('yearSelector').value;
+            if (!year) return;
+
+            const zones = zoneRegistry[iso].zones;
+
+            zones.forEach(zone => {
+                if (!zonalData[zone]) zonalData[zone] = {};
+
+                // 1. Build hourlyData for this zone (Load_MW + CF profiles)
+                const zoneHourlyData = [];
+
+                // Get load data for this zone
+                let loadRows = rawLoadData ? rawLoadData.filter(r => String(r.Year) === String(year)) : [];
+
+                // Handle leap year
+                const selectedYear = parseInt(year);
+                if (isLeapYear(selectedYear) && loadRows.length === 8784) {
+                    loadRows = removeLeapDay(loadRows, selectedYear);
+                }
+
+                const hoursNeeded = Math.min(loadRows.length, 8760);
+
+                // Get zone-specific CF data
+                const zoneCfData = rawGenDataZonal[zone] || [];
+                // Group CF data by hour for quick lookup
+                const cfByHour = {};
+                zoneCfData.forEach(row => {
+                    if (!cfByHour[row.Hour]) cfByHour[row.Hour] = {};
+                    cfByHour[row.Hour][row.Technology] = row.Capacity_Factor;
+                });
+
+                // Get the tech-to-header mapping from generationTypes
+                const techHeaderMap = {};
+                generationTypes.forEach(t => {
+                    if (t.header) techHeaderMap[t.header] = t.id;
+                });
+
+                for (let h = 0; h < hoursNeeded; h++) {
+                    const row = {};
+
+                    // Load_MW from zone column
+                    const loadVal = parseFloat(loadRows[h]?.[zone]);
+                    row.Load_MW = isNaN(loadVal) ? 0 : loadVal;
+
+                    // CF profiles from zonal data
+                    const hourCf = cfByHour[h] || cfByHour[h + 1] || {}; // Try 0-based and 1-based
+
+                    generationTypes.forEach(tech => {
+                        if (tech.header) {
+                            // Try to find CF by technology name match
+                            const cf = hourCf[tech.name] ?? hourCf[tech.id] ?? 0;
+                            row[tech.header] = cf;
+                        }
+                    });
+
+                    zoneHourlyData.push(row);
+                }
+
+                zonalData[zone].hourlyData = zoneHourlyData;
+
+                // 2. Zone-specific dispatch assets (if available from project DB)
+                // This gets populated by updateSystemFromProjectDBZonal
+                if (!zonalData[zone].dispatchAssets) {
+                    zonalData[zone].dispatchAssets = [];
+                }
+
+                // 3. Zone-specific installed capacities (default to proportional split)
+                if (!zonalData[zone].installedCapacities) {
+                    zonalData[zone].installedCapacities = {};
+                }
+
+                // 4. Zone-specific etrCapacities
+                if (!zonalData[zone].etrCapacities) {
+                    zonalData[zone].etrCapacities = {};
+                }
+            });
+
+            console.log(`Zonal hourly data built for ${iso}: ${zones.length} zones, ${zonalData[zones[0]]?.hourlyData?.length || 0} hours each`);
+        }
+
+        // ============================================================
+        // ZONAL: Partition project DB into per-zone data
+        // ============================================================
+        function updateSystemFromProjectDBZonal(iso, year) {
+            if (!projectDatabase || !zoneRegistry[iso]?.isZonal) return;
+
+            const zones = zoneRegistry[iso].zones;
+            const selectedYear = parseInt(year);
+
+            const techMap = {
+                'Onshore Wind': 'onshore-wind', 'Offshore Wind': 'offshore-wind',
+                'Solar': 'solar', 'Solar PV': 'solar', 'CSP': 'solar',
+                'Hydro': 'hydro', 'Biomass': 'biomass', 'Geothermal': 'geothermal', 'Nuclear': 'nuclear',
+                'Natural Gas': 'existing-gas', 'Gas': 'existing-gas', 'Landfill Gas': 'existing-gas', 'Other Gas': 'existing-gas',
+                'New Build Gas CCGT': 'new-gas-ccgt', 'New Gas CCGT': 'new-gas-ccgt',
+                'New Build Gas CT': 'new-gas-ct', 'New Gas CT': 'new-gas-ct',
+                'Coal': 'coal', 'Oil': 'oil',
+                'Other': 'other', 'Fuel Cell': 'other', 'MSW': 'other',
+                'Battery': 'storage', 'Storage': 'storage', 'Pumped Hydro': 'storage',
+                'Net Imports': 'imports'
+            };
+
+            // Initialize per-zone structures
+            zones.forEach(zone => {
+                if (!zonalData[zone]) zonalData[zone] = {};
+                zonalData[zone].capacitySums = {};
+                zonalData[zone].dispatchAssets = [];
+                generationTypes.forEach(t => zonalData[zone].capacitySums[t.id] = 0);
+            });
+
+            // Map projects to zones
+            projectDatabase.forEach(proj => {
+                // Determine which zone this project belongs to
+                const projZone = (proj.Zone || '').trim();
+                const projEnvZone = (proj.ENVZone || '').trim();
+                const projIso = (proj.ISOTerritory || '').trim();
+
+                // Try to match to a zone in this ISO
+                let matchedZone = null;
+
+                // Direct zone match
+                if (projZone && zones.includes(projZone)) {
+                    matchedZone = projZone;
+                }
+                // Try ENVZone with ISO prefix
+                else if (projEnvZone) {
+                    const prefixed = iso + '_' + projEnvZone;
+                    if (zones.includes(prefixed)) matchedZone = prefixed;
+                    else if (zones.includes(projEnvZone)) matchedZone = projEnvZone;
+                }
+                // ISO match but no zone info - distribute to first zone (fallback)
+                else if (isoNamesMatch(projIso, iso) || (isoNamesMatch(iso, 'CAISO') && ['SP15','NP15','ZP26'].includes(projIso))) {
+                    matchedZone = zones[0]; // default to first zone
+                }
+
+                if (!matchedZone) return;
+
+                // Year filter
+                if (proj.FirstPowerDate) {
+                    const d = new Date(proj.FirstPowerDate);
+                    if (!isNaN(d.getTime()) && d.getFullYear() > selectedYear) return;
+                }
+
+                // Retirement filter
+                if (proj.RetirementDate) {
+                    const retDate = new Date(proj.RetirementDate);
+                    if (!isNaN(retDate.getTime()) && retDate.getFullYear() <= selectedYear) return;
+                }
+
+                const mappedId = techMap[proj.ProjectType];
+                if (!mappedId) return;
+
+                const mw = parseFloat(proj.ProjectCapacityMW) || parseFloat(proj.CurrentOperatingCapacityMW) || 0;
+                zonalData[matchedZone].capacitySums[mappedId] = (zonalData[matchedZone].capacitySums[mappedId] || 0) + mw;
+
+                // Build dispatch assets for thermal
+                if (['existing-gas','new-gas-ccgt','new-gas-ct','coal','oil','other'].includes(mappedId)) {
+                    zonalData[matchedZone].dispatchAssets.push({
+                        Asset_ID: proj.ENVProjectID,
+                        Asset_Name: proj.ProjectName,
+                        Asset_Type: proj.ProjectType,
+                        Capacity_MW: mw,
+                        Heat_Rate: parseFloat(proj.HeatRateMmbtuMwh) || (mappedId === 'coal' ? 10.0 : (mappedId === 'oil' ? 10.0 : (mappedId === 'other' ? 9.0 : (mappedId === 'new-gas-ccgt' ? 6.5 : (mappedId === 'new-gas-ct' ? 10.0 : 8.0)))))
+                    });
+                }
+            });
+
+            // Set installed capacities and etrCapacities per zone
+            zones.forEach(zone => {
+                zonalData[zone].installedCapacities = { ...zonalData[zone].capacitySums };
+                zonalData[zone].etrCapacities = { ...zonalData[zone].capacitySums };
+            });
+
+            const zoneCounts = zones.map(z => `${z.split('_').pop()}:${zonalData[z].dispatchAssets.length}`).join(', ');
+            console.log(`Zonal project DB partitioned for ${iso}: ${zoneCounts}`);
+        }
+
         function updateDropdowns() {
             // Merge available ISOs and Years from Market Assumptions and Load Data
             const isoSet = new Set();
@@ -4422,10 +4831,17 @@
                 // Identify ISO columns by excluding 'Year' and 'Date UTC'
                 const keys = Object.keys(rawLoadData[0] || {});
                 keys.forEach(k => {
-                    if (k !== 'Year' && k !== 'Date UTC' && k.trim() !== '') isoSet.add(k);
+                    if (k !== 'Year' && k !== 'Date UTC' && k.trim() !== '') {
+                        // ZONAL: Map sub-zone columns to their parent ISO
+                        const parentIso = getParentIso(k);
+                        isoSet.add(parentIso);
+                    }
                 });
                 rawLoadData.forEach(r => { if(r.Year) yearSet.add(String(r.Year)); });
             }
+
+            // ZONAL: Build zone registry after scanning data
+            buildZoneRegistry();
 
             const isoSel = document.getElementById('isoSelector');
             const yearSel = document.getElementById('yearSelector');
@@ -4470,6 +4886,36 @@
             // If we auto-selected values, trigger applyAssumptions to initialize properly
             if (needsApply) {
                 applyAssumptions();
+            }
+
+            // ZONAL: Update zone selector based on selected ISO
+            updateZoneSelector();
+        }
+
+        // ============================================================
+        // ZONAL: Update zone selector dropdown
+        // ============================================================
+        function updateZoneSelector() {
+            let zoneSel = document.getElementById('zoneSelector');
+            if (!zoneSel) return; // Zone selector not in DOM yet
+
+            const iso = document.getElementById('isoSelector')?.value;
+            const reg = zoneRegistry[iso];
+
+            if (reg?.isZonal) {
+                zoneSel.innerHTML = '<option value="aggregate">All Zones (Aggregate)</option>';
+                reg.zones.forEach(zone => {
+                    const opt = document.createElement('option');
+                    opt.value = zone;
+                    opt.textContent = zone.replace(iso + '_', ''); // Show short name
+                    zoneSel.appendChild(opt);
+                });
+                zoneSel.disabled = false;
+                zoneSel.closest('.zone-selector-wrapper')?.classList.remove('hidden');
+            } else {
+                zoneSel.innerHTML = '<option value="">N/A</option>';
+                zoneSel.disabled = true;
+                zoneSel.closest('.zone-selector-wrapper')?.classList.add('hidden');
             }
         }
 
@@ -6321,6 +6767,24 @@
                     updatePriceMetricsDisplay();
                 }
             });
+            // ZONAL: Zone selector change - switch displayed results without re-running model
+            const zoneSelectorEl = document.getElementById('zoneSelector');
+            if (zoneSelectorEl) {
+                zoneSelectorEl.addEventListener('change', () => {
+                    const zone = zoneSelectorEl.value;
+                    if (Object.keys(cachedZonalResults).length > 0) {
+                        // Switch display without re-running
+                        const iso = document.getElementById('isoSelector')?.value;
+                        const displayResult = (zone && zone !== 'aggregate')
+                            ? cachedZonalResults[zone]
+                            : aggregateZonalResults(cachedZonalResults, zoneRegistry[iso]?.zones || []);
+                        if (displayResult) {
+                            showNotification(`Viewing: ${zone === 'aggregate' ? 'All Zones (Aggregate)' : zone}`);
+                        }
+                    }
+                });
+            }
+
             document.querySelectorAll('input[type="range"], input[type="number"]').forEach(i => {
                 i.addEventListener('input', () => { if(i.type === 'range') updateSliderValue(i.id); });
                 i.addEventListener('change', async () => { if(hourlyData.length > 0 && dispatchAssets.length > 0) await runModel(); });
@@ -6950,6 +7414,469 @@
             return hourlyReserveMargins;
         }
 
+        // ============================================================
+        // ZONAL: Multi-Zone Dispatch Orchestrator
+        // ============================================================
+        async function runMultiZoneModel(iso, conf, isHeadless = true) {
+            const reg = zoneRegistry[iso];
+            if (!reg?.isZonal) return null;
+
+            const zones = reg.zones;
+            const isoLimits = transferLimits.filter(l =>
+                zones.includes(l.from) && zones.includes(l.to)
+            );
+
+            // Get shared config
+            const ppConfig = window.ppConfig || DEFAULT_PP_CONFIG;
+
+            // Step 1: Build per-zone contexts
+            const ctx = {};
+            const originalHourlyData = {}; // save originals for transfer adjustment
+
+            zones.forEach(zone => {
+                const zd = zonalData[zone] || {};
+                const zoneHourly = zd.hourlyData || [];
+                const zoneDispatch = zd.dispatchAssets || dispatchAssets;
+                const zoneCapacities = zd.installedCapacities || {};
+                const zoneEtr = zd.etrCapacities || {};
+
+                // Pre-calculate zone-specific gas prices
+                const zoneGasPrices = preCalculateHourlyGasPrices(conf.gasCost, zone);
+
+                originalHourlyData[zone] = zoneHourly.map(row => ({ ...row })); // deep copy
+
+                ctx[zone] = {
+                    hourlyData: zoneHourly,
+                    dispatchAssets: zoneDispatch,
+                    generationTypes,
+                    etrCapacities: zoneEtr,
+                    installedCapacities: zoneCapacities,
+                    conf,
+                    hourlyGasPrices: zoneGasPrices,
+                    ppConfig,
+                    fundamentalCalibrator: zd.calibrator || fundamentalCalibrator,
+                    baseScalars: zd.baseScalars ?? baseScalars
+                };
+            });
+
+            // Step 2: Initial per-zone dispatch (no transfers)
+            const results = {};
+            for (const zone of zones) {
+                results[zone] = await runCoreModel(ctx[zone]);
+            }
+
+            // Step 3: Iterative transfer resolution
+            if (isoLimits.length > 0) {
+                for (let iter = 0; iter < MAX_TRANSFER_ITERS; iter++) {
+                    // Compute transfers based on price differentials
+                    const netTransfers = computeInterZonalTransfers(results, isoLimits, zones);
+
+                    // Apply transfers to load
+                    zones.forEach(zone => {
+                        const original = originalHourlyData[zone];
+                        const transfers = netTransfers[zone] || new Float64Array(8760);
+                        const adjusted = original.map((row, h) => ({
+                            ...row,
+                            Load_MW: (row.Load_MW || 0) - (transfers[h] || 0) // positive transfer = import = reduces load
+                        }));
+                        ctx[zone].hourlyData = adjusted;
+                    });
+
+                    // Re-dispatch
+                    const prevPrices = {};
+                    zones.forEach(z => { prevPrices[z] = results[z].hourlyPrices; });
+
+                    for (const zone of zones) {
+                        results[zone] = await runCoreModel(ctx[zone]);
+                    }
+
+                    // Check convergence
+                    let maxPriceChange = 0;
+                    zones.forEach(zone => {
+                        const prev = prevPrices[zone];
+                        const curr = results[zone].hourlyPrices;
+                        if (prev && curr) {
+                            for (let h = 0; h < Math.min(prev.length, curr.length); h++) {
+                                maxPriceChange = Math.max(maxPriceChange, Math.abs((curr[h] || 0) - (prev[h] || 0)));
+                            }
+                        }
+                    });
+
+                    if (maxPriceChange < TRANSFER_CONVERGENCE_THRESHOLD) {
+                        console.log(`Zonal transfers converged at iteration ${iter + 1} (max price delta: $${maxPriceChange.toFixed(2)})`);
+                        break;
+                    }
+                }
+            }
+
+            // Step 4: Post-process prices per zone
+            const finalResults = {};
+            for (const zone of zones) {
+                const zd = zonalData[zone] || {};
+                const hourlyReserveMargins = calculateHourlyReserveMargins(
+                    results[zone], ctx[zone].installedCapacities,
+                    ctx[zone].hourlyData, generationTypes
+                );
+
+                const ppResult = postProcessPrices(
+                    results[zone].hourlyPrices, results[zone].netLoad,
+                    Object.values(ctx[zone].installedCapacities).reduce((a, b) => a + b, 0),
+                    conf.gasCost,
+                    document.getElementById('yearSelector')?.value || '2025',
+                    ppConfig, hourlyReserveMargins, ctx[zone].hourlyGasPrices,
+                    ctx[zone].fundamentalCalibrator, ctx[zone].baseScalars,
+                    historicalAvgPrice, dailyGasPricesData
+                );
+
+                const marketMetrics = calculateMarketMetrics(
+                    results[zone], ctx[zone].installedCapacities, conf,
+                    ctx[zone].hourlyData, generationTypes,
+                    userElccOverrides, csvHardcodedElcc
+                );
+
+                const financials = getFinancialsWithMetrics(
+                    results[zone].hourlyGeneration, ppResult.finalPrices,
+                    ctx[zone].installedCapacities, marketMetrics, conf,
+                    null, results[zone].existingGasWeightedHeatRate,
+                    generationTypes, ctx[zone].etrCapacities, ctx[zone].hourlyGasPrices
+                );
+
+                finalResults[zone] = {
+                    ...results[zone],
+                    finalPrices: ppResult.finalPrices,
+                    hourlyReserveMargins,
+                    marketMetrics,
+                    financials,
+                    installedCapacities: ctx[zone].installedCapacities
+                };
+            }
+
+            // Step 5: Aggregate to ISO level
+            const isoResults = aggregateZonalResults(finalResults, zones);
+
+            return { zonalResults: finalResults, isoResults };
+        }
+
+        // ============================================================
+        // ZONAL: Compute inter-zonal transfers (price-differential driven)
+        // ============================================================
+        function computeInterZonalTransfers(results, limits, zones) {
+            const hours = 8760;
+            const netTransfers = {};
+            zones.forEach(z => { netTransfers[z] = new Float64Array(hours); });
+
+            for (let h = 0; h < hours; h++) {
+                limits.forEach(corridor => {
+                    const priceFrom = results[corridor.from]?.hourlyPrices?.[h] || 0;
+                    const priceTo = results[corridor.to]?.hourlyPrices?.[h] || 0;
+                    const priceDiff = priceTo - priceFrom;
+
+                    // Flow from low-price to high-price zone
+                    let rawFlow = corridor.slope * priceDiff + corridor.intercept;
+                    const flow = Math.max(-corridor.maxMW, Math.min(corridor.maxMW, rawFlow));
+
+                    // Positive flow = from → to
+                    netTransfers[corridor.from][h] -= flow; // exporting = increases effective load
+                    netTransfers[corridor.to][h] += flow;   // importing = decreases effective load
+                });
+            }
+
+            return netTransfers;
+        }
+
+        // ============================================================
+        // ZONAL: Aggregate zone results to ISO level
+        // ============================================================
+        function aggregateZonalResults(zonalResults, zones) {
+            const hours = 8760;
+            const firstZone = zonalResults[zones[0]];
+            if (!firstZone) return null;
+
+            // Aggregate hourly prices (load-weighted average)
+            const aggPrices = new Float64Array(hours);
+            const aggLoad = new Float64Array(hours);
+            const aggNetLoad = new Float64Array(hours);
+
+            zones.forEach(zone => {
+                const zr = zonalResults[zone];
+                const prices = zr.finalPrices || zr.hourlyPrices;
+                for (let h = 0; h < hours; h++) {
+                    const load = zr.netLoad?.[h] || 0;
+                    aggPrices[h] += (prices?.[h] || 0) * Math.abs(load);
+                    aggLoad[h] += Math.abs(load);
+                    aggNetLoad[h] += (zr.netLoad?.[h] || 0);
+                }
+            });
+
+            // Normalize weighted prices
+            for (let h = 0; h < hours; h++) {
+                aggPrices[h] = aggLoad[h] > 0 ? aggPrices[h] / aggLoad[h] : 0;
+            }
+
+            // Aggregate generation by tech
+            const aggGeneration = {};
+            const techIds = Object.keys(firstZone.hourlyGeneration || {});
+            techIds.forEach(tech => {
+                aggGeneration[tech] = new Float64Array(hours);
+                zones.forEach(zone => {
+                    const gen = zonalResults[zone].hourlyGeneration?.[tech];
+                    if (gen) {
+                        for (let h = 0; h < hours; h++) {
+                            aggGeneration[tech][h] += gen[h];
+                        }
+                    }
+                });
+            });
+
+            // Aggregate market metrics
+            const aggMetrics = { ...firstZone.marketMetrics };
+            let totalCap = 0, totalPeakLoad = 0;
+            zones.forEach(zone => {
+                const zr = zonalResults[zone];
+                totalCap += Object.values(zr.installedCapacities || {}).reduce((a, b) => a + b, 0);
+                // Peak load from hourly data
+                if (zr.netLoad) {
+                    for (let h = 0; h < hours; h++) {
+                        totalPeakLoad = Math.max(totalPeakLoad, zr.netLoad[h] || 0);
+                    }
+                }
+            });
+            aggMetrics.prm = totalPeakLoad > 0 ? (totalCap / totalPeakLoad - 1) : 0;
+
+            // Aggregate installed capacities
+            const aggCapacities = {};
+            zones.forEach(zone => {
+                const zCap = zonalResults[zone].installedCapacities || {};
+                Object.entries(zCap).forEach(([tech, mw]) => {
+                    aggCapacities[tech] = (aggCapacities[tech] || 0) + mw;
+                });
+            });
+
+            return {
+                hourlyPrices: aggPrices,
+                finalPrices: aggPrices,
+                netLoad: aggNetLoad,
+                hourlyGeneration: aggGeneration,
+                marketMetrics: aggMetrics,
+                installedCapacities: aggCapacities,
+                unservedEnergy: zones.reduce((sum, z) => sum + (zonalResults[z].unservedEnergy || 0), 0)
+            };
+        }
+
+        // ============================================================
+        // ZONAL: Multi-Zone Optimizer (independent then coupled)
+        // ============================================================
+        async function runMultiZoneOptimizer(iso, conf, optimizerParams) {
+            const reg = zoneRegistry[iso];
+            if (!reg?.isZonal) return null;
+
+            const zones = reg.zones;
+            const year = document.getElementById('yearSelector')?.value || '2025';
+            const ppConfig = window.ppConfig || DEFAULT_PP_CONFIG;
+
+            // Build per-zone optimizer contexts
+            const zonalCtx = {};
+            zones.forEach(zone => {
+                const zd = zonalData[zone] || {};
+                zonalCtx[zone] = {
+                    hourlyData: zd.hourlyData || [],
+                    dispatchAssets: zd.dispatchAssets || [],
+                    generationTypes,
+                    etrCapacities: zd.etrCapacities || {},
+                    initialCapacities: { ...(zd.installedCapacities || {}) },
+                    conf,
+                    hourlyGasPrices: preCalculateHourlyGasPrices(conf.gasCost, zone),
+                    ppConfig,
+                    fundamentalCalibrator: zd.calibrator || fundamentalCalibrator,
+                    baseScalars: zd.baseScalars ?? baseScalars,
+                    ...optimizerParams // hurdleRates, annualCaps, sensitivity, etc.
+                };
+            });
+
+            const MAX_OUTER_ITERS = 3;
+            let lastResults = {};
+
+            for (let outerIter = 0; outerIter < MAX_OUTER_ITERS; outerIter++) {
+                showNotification(`Zonal optimizer: outer iteration ${outerIter + 1}/${MAX_OUTER_ITERS}`);
+
+                // Run optimizer independently per zone
+                for (const zone of zones) {
+                    const result = await runZonalOptimizer({
+                        ...zonalCtx[zone],
+                        iso,
+                        year,
+                        zone
+                    });
+
+                    // Update zone capacities with optimizer result
+                    if (result?.finalCapacities) {
+                        zonalData[zone].installedCapacities = result.finalCapacities;
+                        zonalCtx[zone].initialCapacities = { ...result.finalCapacities };
+                    }
+
+                    lastResults[zone] = result;
+                }
+
+                // Re-run multi-zone dispatch with updated capacities to get transfer-adjusted prices
+                const multiResults = await runMultiZoneModel(iso, conf, true);
+
+                if (!multiResults) break;
+
+                // Update each zone's hourly data with transfer-adjusted loads for next iteration
+                zones.forEach(zone => {
+                    if (multiResults.zonalResults[zone]) {
+                        // Use the transfer-adjusted hourly data for next optimizer run
+                        zonalCtx[zone].hourlyData = zonalData[zone].hourlyData; // reset to original
+                    }
+                });
+
+                // Check convergence across all zones
+                let allConverged = true;
+                zones.forEach(zone => {
+                    const result = lastResults[zone];
+                    if (result && result.maxDelta && result.maxDelta >= 100) {
+                        allConverged = false;
+                    }
+                });
+
+                if (allConverged) {
+                    console.log(`Multi-zone optimizer converged at outer iteration ${outerIter + 1}`);
+                    break;
+                }
+            }
+
+            // Final multi-zone dispatch with converged capacities
+            const finalResults = await runMultiZoneModel(iso, conf, false);
+            return finalResults;
+        }
+
+        // ============================================================
+        // ZONAL: Zone Summary Table UI
+        // ============================================================
+        function updateZoneSummaryTable(zonalResults, zones) {
+            let container = document.getElementById('zone-summary-container');
+            if (!container) {
+                // Create container dynamically after the main results area
+                const mainGrid = document.querySelector('.flex-grow.container');
+                if (!mainGrid) return;
+                container = document.createElement('div');
+                container.id = 'zone-summary-container';
+                container.className = 'mt-4 bg-prism-card border border-prism-border rounded-sm shadow-sm';
+                mainGrid.appendChild(container);
+            }
+
+            let html = `
+                <div class="px-4 py-3 border-b border-prism-border flex justify-between items-center cursor-pointer hover:bg-white/5" onclick="toggleSection(this)">
+                    <h2 class="text-xs font-bold text-prism-blue uppercase tracking-wider">Zone Summary</h2>
+                    <svg class="w-4 h-4 text-prism-muted chevron" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                </div>
+                <div class="collapse-content" style="max-height: none;">
+                    <div class="p-3 overflow-x-auto">
+                        <table class="w-full text-xs text-right">
+                            <thead>
+                                <tr class="border-b border-prism-border text-prism-muted">
+                                    <th class="text-left py-2 px-2">Zone</th>
+                                    <th class="py-2 px-2">Peak Load<br><span class="unit">(MW)</span></th>
+                                    <th class="py-2 px-2">Avg Price<br><span class="unit">($/MWh)</span></th>
+                                    <th class="py-2 px-2">Reserve Margin<br><span class="unit">(%)</span></th>
+                                    <th class="py-2 px-2">Total Cap<br><span class="unit">(MW)</span></th>
+                                    <th class="py-2 px-2">Solar<br><span class="unit">(MW)</span></th>
+                                    <th class="py-2 px-2">Wind<br><span class="unit">(MW)</span></th>
+                                    <th class="py-2 px-2">Gas<br><span class="unit">(MW)</span></th>
+                                    <th class="py-2 px-2">Storage<br><span class="unit">(MW)</span></th>
+                                </tr>
+                            </thead>
+                            <tbody>`;
+
+            let totalPeakLoad = 0, totalCap = 0, totalSolar = 0, totalWind = 0, totalGas = 0, totalStorage = 0;
+            let priceSum = 0;
+
+            zones.forEach(zone => {
+                const zr = zonalResults[zone];
+                if (!zr) return;
+
+                const prices = zr.finalPrices || zr.hourlyPrices || [];
+                const avgPrice = prices.length > 0 ? Array.from(prices).reduce((a, b) => a + b, 0) / prices.length : 0;
+                const peakLoad = zr.netLoad ? Math.max(...Array.from(zr.netLoad)) : 0;
+                const cap = zr.installedCapacities || {};
+                const zoneTotalCap = Object.values(cap).reduce((a, b) => a + b, 0);
+                const prm = zr.marketMetrics?.prm ?? 0;
+
+                const solar = cap['solar'] || 0;
+                const wind = (cap['onshore-wind'] || 0) + (cap['offshore-wind'] || 0);
+                const gas = (cap['existing-gas'] || 0) + (cap['new-gas-ccgt'] || 0) + (cap['new-gas-ct'] || 0);
+                const storage = cap['storage'] || 0;
+
+                totalPeakLoad += peakLoad;
+                totalCap += zoneTotalCap;
+                totalSolar += solar;
+                totalWind += wind;
+                totalGas += gas;
+                totalStorage += storage;
+                priceSum += avgPrice;
+
+                const shortName = zone.includes('_') ? zone.split('_').slice(1).join('_') : zone;
+                html += `<tr class="border-b border-prism-border/30 hover:bg-white/5">
+                    <td class="text-left py-1.5 px-2 text-prism-text font-medium">${shortName}</td>
+                    <td class="py-1.5 px-2">${Math.round(peakLoad).toLocaleString()}</td>
+                    <td class="py-1.5 px-2">$${avgPrice.toFixed(1)}</td>
+                    <td class="py-1.5 px-2 ${prm < 0.1 ? 'text-red-400' : prm < 0.15 ? 'text-yellow-400' : 'text-prism-green'}">${(prm * 100).toFixed(1)}%</td>
+                    <td class="py-1.5 px-2">${Math.round(zoneTotalCap).toLocaleString()}</td>
+                    <td class="py-1.5 px-2">${Math.round(solar).toLocaleString()}</td>
+                    <td class="py-1.5 px-2">${Math.round(wind).toLocaleString()}</td>
+                    <td class="py-1.5 px-2">${Math.round(gas).toLocaleString()}</td>
+                    <td class="py-1.5 px-2">${Math.round(storage).toLocaleString()}</td>
+                </tr>`;
+            });
+
+            const avgAvgPrice = zones.length > 0 ? priceSum / zones.length : 0;
+            const isoPrm = totalPeakLoad > 0 ? (totalCap / totalPeakLoad - 1) : 0;
+
+            html += `<tr class="border-t-2 border-prism-blue/50 font-bold text-prism-text">
+                    <td class="text-left py-2 px-2">ISO TOTAL</td>
+                    <td class="py-2 px-2">${Math.round(totalPeakLoad).toLocaleString()}</td>
+                    <td class="py-2 px-2">$${avgAvgPrice.toFixed(1)}</td>
+                    <td class="py-2 px-2">${(isoPrm * 100).toFixed(1)}%</td>
+                    <td class="py-2 px-2">${Math.round(totalCap).toLocaleString()}</td>
+                    <td class="py-2 px-2">${Math.round(totalSolar).toLocaleString()}</td>
+                    <td class="py-2 px-2">${Math.round(totalWind).toLocaleString()}</td>
+                    <td class="py-2 px-2">${Math.round(totalGas).toLocaleString()}</td>
+                    <td class="py-2 px-2">${Math.round(totalStorage).toLocaleString()}</td>
+                </tr>`;
+
+            // Add transfer corridor summary if available
+            const isoLimits = transferLimits.filter(l => zones.includes(l.from) && zones.includes(l.to));
+            if (isoLimits.length > 0) {
+                html += `</tbody></table>
+                    <h3 class="text-xs font-bold text-prism-muted uppercase tracking-wider mt-4 mb-2">Transfer Corridors</h3>
+                    <table class="w-full text-xs text-right">
+                        <thead>
+                            <tr class="border-b border-prism-border text-prism-muted">
+                                <th class="text-left py-1 px-2">Corridor</th>
+                                <th class="py-1 px-2">Max MW</th>
+                                <th class="py-1 px-2">Slope</th>
+                                <th class="py-1 px-2">Tx Capex</th>
+                            </tr>
+                        </thead>
+                        <tbody>`;
+
+                isoLimits.forEach(l => {
+                    const fromShort = l.from.includes('_') ? l.from.split('_').slice(1).join('_') : l.from;
+                    const toShort = l.to.includes('_') ? l.to.split('_').slice(1).join('_') : l.to;
+                    html += `<tr class="border-b border-prism-border/30">
+                        <td class="text-left py-1 px-2 text-prism-text">${fromShort} → ${toShort}</td>
+                        <td class="py-1 px-2">${l.maxMW.toLocaleString()}</td>
+                        <td class="py-1 px-2">${l.slope.toFixed(2)}</td>
+                        <td class="py-1 px-2">$${l.txCapex.toLocaleString()}/MW</td>
+                    </tr>`;
+                });
+            }
+
+            html += `</tbody></table></div></div>`;
+            container.innerHTML = html;
+            container.classList.remove('hidden');
+        }
+
       async function runModel(isHeadless = false, configOverride = null, capacitiesOverride = null, skipAutoTrainingNotification = false, skipUIUpdates = false) {
             // 1. Determine Inputs: Use overrides if provided (Headless), otherwise read from DOM
             let conf, installedCapacities;
@@ -6996,12 +7923,46 @@
                 });
             }
             
+            // ZONAL: Check if this ISO has zones and dispatch to multi-zone path
+            const currentIso = document.getElementById('isoSelector')?.value;
+            if (zoneRegistry[currentIso]?.isZonal && !configOverride) {
+                // Build zonal hourly data if not already done
+                rebuildZonalHourlyData(currentIso);
+                updateSystemFromProjectDBZonal(currentIso, document.getElementById('yearSelector')?.value);
+
+                const multiResult = await runMultiZoneModel(currentIso, conf, isHeadless);
+                if (multiResult) {
+                    cachedZonalResults = multiResult.zonalResults;
+
+                    // Display based on zone selector
+                    const selectedDisplayZone = document.getElementById('zoneSelector')?.value;
+                    const displayResult = (selectedDisplayZone && selectedDisplayZone !== 'aggregate')
+                        ? multiResult.zonalResults[selectedDisplayZone]
+                        : multiResult.isoResults;
+
+                    if (displayResult && !isHeadless && !skipUIUpdates) {
+                        // Update zone summary table
+                        updateZoneSummaryTable(multiResult.zonalResults, zoneRegistry[currentIso].zones);
+                    }
+
+                    // Return aggregate results for compatibility
+                    return {
+                        hourlyPrices: displayResult?.finalPrices || displayResult?.hourlyPrices,
+                        hourlyGeneration: displayResult?.hourlyGeneration,
+                        marketMetrics: displayResult?.marketMetrics,
+                        netLoad: displayResult?.netLoad,
+                        zonalResults: multiResult.zonalResults,
+                        isoResults: multiResult.isoResults
+                    };
+                }
+            }
+
             // 2. Optimization: Pre-calculate hourly gas prices (from copilot branch)
             // This relies on the helper function you created in the "Vectorize Gas Price Scalars" step
             const hourlyGasPrices = preCalculateHourlyGasPrices(conf.gasCost);
-            
+
             // 3. Execute Core Model with the new optimized argument
-            const coreResults = await runCoreModel({ hourlyData, dispatchAssets, generationTypes, etrCapacities, installedCapacities, conf, hourlyGasPrices, ppConfig, fundamentalCalibrator, baseScalars });       
+            const coreResults = await runCoreModel({ hourlyData, dispatchAssets, generationTypes, etrCapacities, installedCapacities, conf, hourlyGasPrices, ppConfig, fundamentalCalibrator, baseScalars });
             
             // Calculate total system capacity (sum of all installed capacities: thermal, renewables, and storage)
             let totalSystemCapacity = 0;
