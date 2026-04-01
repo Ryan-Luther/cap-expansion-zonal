@@ -705,6 +705,7 @@
         let cachedZonalResults = {};    // { zoneName: { hourlyPrices, hourlyGeneration, ... } } for zone selector switching
         let rawGenDataZonal = {};       // { zoneName: [{ Hour, Technology, CF }, ...] } - zonal capacity factor data (wide format)
         const MAX_TRANSFER_ITERS = 3;   // Max iterations for inter-zonal transfer convergence
+        let suppressSliderModelRun = false; // Suppress model re-run when programmatically updating sliders
         const TRANSFER_CONVERGENCE_THRESHOLD = 2.0; // $/MWh max price change to declare convergence
 
         // DOM Element Cache - speeds up updateFinancialTable by avoiding repeated document.getElementById calls
@@ -7138,21 +7139,15 @@ self.onmessage = async function(e) {
                 zoneSelectorEl.addEventListener('change', () => {
                     const zone = zoneSelectorEl.value;
                     if (Object.keys(cachedZonalResults).length > 0) {
-                        // Switch display without re-running
-                        const iso = document.getElementById('isoSelector')?.value;
-                        const displayResult = (zone && zone !== 'aggregate')
-                            ? cachedZonalResults[zone]
-                            : aggregateZonalResults(cachedZonalResults, zoneRegistry[iso]?.zones || []);
-                        if (displayResult) {
-                            showNotification(`Viewing: ${zone === 'aggregate' ? 'All Zones (Aggregate)' : zone}`);
-                        }
+                        displayZoneResults(zone);
+                        showNotification(`Viewing: ${zone === 'aggregate' ? 'All Zones (Aggregate)' : zone}`);
                     }
                 });
             }
 
             document.querySelectorAll('input[type="range"], input[type="number"]').forEach(i => {
                 i.addEventListener('input', () => { if(i.type === 'range') updateSliderValue(i.id); });
-                i.addEventListener('change', async () => { if(hourlyData.length > 0 && dispatchAssets.length > 0) await runModel(); });
+                i.addEventListener('change', async () => { if(!suppressSliderModelRun && hourlyData.length > 0 && dispatchAssets.length > 0) await runModel(); });
             });
             document.getElementById('drop-zone').addEventListener('click', () => document.getElementById('csvFile').click());
             
@@ -8202,6 +8197,113 @@ self.onmessage = async function(e) {
         // ============================================================
         // ZONAL: Zone Summary Table UI
         // ============================================================
+        // ZONAL: Display zone results from cache — shared by zone selector and runModel
+        function displayZoneResults(zone) {
+            const iso = document.getElementById('isoSelector')?.value;
+            if (!iso || Object.keys(cachedZonalResults).length === 0) return;
+
+            const isAggregate = !zone || zone === 'aggregate';
+            const dr = isAggregate
+                ? aggregateZonalResults(cachedZonalResults, zoneRegistry[iso]?.zones || [])
+                : cachedZonalResults[zone];
+            if (!dr) return;
+
+            const drPrices = dr.finalPrices || dr.hourlyPrices;
+            const drGen = dr.hourlyGeneration;
+            const drMetrics = dr.marketMetrics || {};
+            const drInstalledCap = dr.installedCapacities || {};
+            const currentYear = document.getElementById('yearSelector')?.value;
+            const historicalPrices = extractHistoricalPricesByYear(parseInt(currentYear));
+
+            // a) Simulation charts
+            try { updateDispatchChart(dr.netLoad, dr.netLoadAfterStorage || dr.netLoad, drPrices); } catch(e) { console.warn('Zone display dispatch chart:', e.message); }
+            try { updateMonthlyMixChart(drGen); } catch(e) { console.warn('Zone display monthly chart:', e.message); }
+            try { updateDiurnalMixChart(drGen, drPrices, dr.hourlyPrices || drPrices, historicalPrices); } catch(e) { console.warn('Zone display diurnal chart:', e.message); }
+            try {
+                let dispStack = dr.fullDispatchStack;
+                if (!dispStack && isAggregate) {
+                    dispStack = [];
+                    Object.values(cachedZonalResults).forEach(zr => {
+                        if (zr.fullDispatchStack) zr.fullDispatchStack.forEach(a => dispStack.push({...a}));
+                    });
+                    dispStack.sort((a, b) => a.cost - b.cost);
+                }
+                if (dispStack) updateDispatchCurveChart(dispStack);
+            } catch(e) { console.warn('Zone display dispatch curve:', e.message); }
+
+            // b) Financial table
+            try {
+                const conf = { gasCost: parseFloat(document.getElementById('gas-fuel-cost')?.value) || 3.5, txMargin: parseFloat(document.getElementById('tx-margin-input')?.value) || 15, txSuppression: parseFloat(document.getElementById('tx-suppression')?.value) || 1 };
+                updateFinancialTable(drGen, drPrices, drInstalledCap, dr.totalCost || 0, dr.unservedEnergy || 0, dr.peakUnservedEnergy || 0, drMetrics.planningReserveMargin || 0, drMetrics, conf, dr.existingGasWeightedHeatRate || 0);
+            } catch(e) { console.warn('Zone display financials:', e.message); }
+
+            // c) Market Results cards
+            const safeSetText = (id, val) => { const el = document.getElementById(id) || (uiCache && uiCache[id]); if(el) el.textContent = val; };
+            safeSetText('unserved-energy-output', Math.round(dr.unservedEnergy || 0).toLocaleString());
+            safeSetText('peak-unserved-energy-output', Math.round(dr.peakUnservedEnergy || 0).toLocaleString());
+            safeSetText('capacity-market-rm-output', (drMetrics.planningReserveMargin || 0).toFixed(1));
+            safeSetText('peak-reserve-margin-output', (drMetrics.peakReserveMargin || 0).toFixed(1));
+            safeSetText('renewable-share-output', ((drMetrics.renewableShare || 0) * 100).toFixed(1));
+            safeSetText('clean-energy-share-output', ((drMetrics.cleanEnergyShare || 0) * 100).toFixed(1));
+            safeSetText('renewable-curtailment-output', ((drMetrics.renewableCurtailment || 0) * 100).toFixed(1));
+            safeSetText('capacity-price-output', `$${(drMetrics.capacityPrice || 0).toFixed(2)}`);
+            safeSetText('rec-price-output', `$${(drMetrics.recPrice || 0).toFixed(2)}`);
+            safeSetText('total-cost-output', `$${((dr.totalCost || 0) / 1e9).toFixed(2)}`);
+
+            // d) Update installed capacity sliders (suppress model re-run)
+            suppressSliderModelRun = true;
+            try {
+                if (Object.keys(drInstalledCap).length > 0) {
+                    generationTypes.forEach(tech => {
+                        const slider = document.getElementById(`${tech.id}-slider`);
+                        if (slider) {
+                            const val = Math.round(drInstalledCap[tech.id] || 0);
+                            slider.min = 0; // Allow zone capacity below ISO-level minimums
+                            slider.max = Math.max(parseInt(slider.max) || 0, val * 2 || 1000);
+                            slider.value = val;
+                            updateSliderValue(slider.id);
+                        }
+                    });
+                }
+            } finally { suppressSliderModelRun = false; }
+
+            // e) Update market assumptions if zone-specific data exists
+            const lookupZone = isAggregate ? iso : zone;
+            if (marketAssumptions && marketAssumptions[lookupZone] && marketAssumptions[lookupZone][currentYear]) {
+                const zData = marketAssumptions[lookupZone][currentYear];
+                const m = zData.market;
+                const setVal = (id, val) => { const el = document.getElementById(id); if(el && val !== undefined && val !== null) el.value = val; };
+                setVal('gas-fuel-cost', m['Gas Price ($/Mmbtu)']);
+                setVal('coal-fuel-cost', m['Coal Price ($/Mmbtu)']);
+                setVal('oil-fuel-cost', m['Oil Price ($/Mmbtu)']);
+                setVal('carbon-cost', m['Carbon Cost ($/ton)']);
+                setVal('bid-margin', m['Marginal Bidder Bid Margin ($/MWh)']);
+                setVal('prm-target', m['Target RM (%)']);
+                setVal('rps-target', m['Target RPS (%)']);
+                setVal('import-slope', m['Import Correlation Slope']);
+                setVal('import-intercept', m['Import Correlation Intercept']);
+                for (const [csvTech, rowData] of Object.entries(zData.techs || {})) {
+                    const techMap = { 'Onshore Wind':'onshore-wind','Offshore Wind':'offshore-wind','Solar':'solar','Hydro':'hydro','Biomass':'biomass','Geothermal':'geothermal','Nuclear':'nuclear','Existing Gas':'existing-gas','New Build Gas CCGT':'new-gas-ccgt','New Build Gas CT':'new-gas-ct','Coal':'coal','Oil':'oil','Other':'other','Battery':'storage','Storage':'storage' };
+                    const appId = techMap[csvTech];
+                    if (appId) {
+                        setVal(`capex-${appId}`, rowData['Capex ($/kW)']);
+                        setVal(`opex-${appId}`, rowData['Opex ($/MW-Mo)']);
+                        setVal(`life-${appId}`, rowData['Life (yrs)']);
+                        setVal(`hurdle-${appId}`, rowData['Hurdle Rate (%)']);
+                    }
+                }
+            }
+
+            // f) Cache updates for PP modal
+            cachedCoreResults = dr;
+            cachedYear = currentYear;
+            cachedInstalledCapacities = drInstalledCap;
+            if (drPrices) simPriceMetrics = calculatePriceMetrics(drPrices);
+
+            // Update zone summary table
+            updateZoneSummaryTable(cachedZonalResults, zoneRegistry[iso]?.zones || []);
+        }
+
         function updateZoneSummaryTable(zonalResults, zones) {
             let container = document.getElementById('zone-summary-container');
             if (!container) {
@@ -8383,69 +8485,26 @@ self.onmessage = async function(e) {
                 if (multiResult) {
                     cachedZonalResults = multiResult.zonalResults;
 
-                    // Display based on zone selector
+                    // Display based on zone selector using shared function
                     const selectedDisplayZone = document.getElementById('zoneSelector')?.value;
+                    if (!isHeadless && !skipUIUpdates) {
+                        displayZoneResults(selectedDisplayZone);
+                    } else {
+                        // Headless: still cache results for PP modal
+                        const displayResult = (selectedDisplayZone && selectedDisplayZone !== 'aggregate')
+                            ? multiResult.zonalResults[selectedDisplayZone]
+                            : multiResult.isoResults;
+                        const drPricesForCache = displayResult?.finalPrices || displayResult?.hourlyPrices;
+                        cachedCoreResults = displayResult;
+                        cachedYear = document.getElementById('yearSelector')?.value;
+                        cachedInstalledCapacities = displayResult?.installedCapacities || installedCapacities;
+                        if (drPricesForCache) simPriceMetrics = calculatePriceMetrics(drPricesForCache);
+                    }
+
+                    // Return results for compatibility
                     const displayResult = (selectedDisplayZone && selectedDisplayZone !== 'aggregate')
                         ? multiResult.zonalResults[selectedDisplayZone]
                         : multiResult.isoResults;
-
-                    if (displayResult && !isHeadless && !skipUIUpdates) {
-                        // Update zone summary table
-                        updateZoneSummaryTable(multiResult.zonalResults, zoneRegistry[currentIso].zones);
-
-                        // Update all charts and financial table with display result
-                        const dr = displayResult;
-                        const drPrices = dr.finalPrices || dr.hourlyPrices;
-                        const drGen = dr.hourlyGeneration;
-                        const drMetrics = dr.marketMetrics || {};
-                        const drInstalledCap = dr.installedCapacities || installedCapacities;
-
-                        // Extract historical prices for comparison
-                        const currentYear = document.getElementById('yearSelector')?.value;
-                        const historicalPrices = extractHistoricalPricesByYear(parseInt(currentYear));
-
-                        // Financial table — pass generationTypes explicitly to avoid window scope issue
-                        try {
-                            const zonalFinancials = dr.financials || getFinancialsWithMetrics(drGen, drPrices, drInstalledCap, drMetrics, conf, {}, dr.existingGasWeightedHeatRate || 0, generationTypes, etrCapacities, currentTaxCredits, null);
-                            updateFinancialTable(drGen, drPrices, drInstalledCap, dr.totalCost || 0, dr.unservedEnergy || 0, dr.peakUnservedEnergy || 0, drMetrics.planningReserveMargin || 0, drMetrics, conf, dr.existingGasWeightedHeatRate || 0);
-                        } catch(e) { console.warn('Zonal financials table:', e.message); }
-
-                        // Simulation charts
-                        try { updateDispatchChart(dr.netLoad, dr.netLoadAfterStorage || dr.netLoad, drPrices); } catch(e) { console.warn('Zonal dispatch chart:', e.message); }
-                        try { updateMonthlyMixChart(drGen); } catch(e) { console.warn('Zonal monthly chart:', e.message); }
-                        try { updateDiurnalMixChart(drGen, drPrices, dr.hourlyPrices || drPrices, historicalPrices); } catch(e) { console.warn('Zonal diurnal chart:', e.message); }
-                        // Dispatch curve: for aggregate, concatenate all zones' stacks preserving individual assets
-                        try {
-                            let dispStack = dr.fullDispatchStack;
-                            if (!dispStack && selectedDisplayZone === 'aggregate') {
-                                dispStack = [];
-                                Object.values(multiResult.zonalResults).forEach(zr => {
-                                    if (zr.fullDispatchStack) zr.fullDispatchStack.forEach(a => dispStack.push({...a}));
-                                });
-                                dispStack.sort((a, b) => a.cost - b.cost);
-                            }
-                            if (dispStack) updateDispatchCurveChart(dispStack);
-                        } catch(e) { console.warn('Zonal dispatch curve:', e.message); }
-
-                        // Market metric text
-                        const safeSetText = (id, val) => { const el = document.getElementById(id); if(el) el.textContent = val; };
-                        safeSetText('capacity-price-output', `$${(drMetrics.capacityPrice || 0).toFixed(2)}`);
-                        safeSetText('rec-price-output', `$${(drMetrics.recPrice || 0).toFixed(2)}`);
-                        safeSetText('renewable-share-output', ((drMetrics.renewableShare || 0) * 100).toFixed(1));
-                        safeSetText('clean-energy-share-output', ((drMetrics.cleanEnergyShare || 0) * 100).toFixed(1));
-                        safeSetText('renewable-curtailment-output', ((drMetrics.renewableCurtailment || 0) * 100).toFixed(1));
-                    }
-
-                    // Cache results for post-processing, calibration, and price metrics
-                    const drPricesForCache = displayResult?.finalPrices || displayResult?.hourlyPrices;
-                    cachedCoreResults = displayResult;
-                    cachedYear = document.getElementById('yearSelector')?.value;
-                    cachedInstalledCapacities = displayResult?.installedCapacities || installedCapacities;
-                    if (drPricesForCache) {
-                        simPriceMetrics = calculatePriceMetrics(drPricesForCache);
-                    }
-
-                    // Return aggregate results for compatibility
                     return {
                         hourlyPrices: displayResult?.finalPrices || displayResult?.hourlyPrices,
                         hourlyGeneration: displayResult?.hourlyGeneration,
