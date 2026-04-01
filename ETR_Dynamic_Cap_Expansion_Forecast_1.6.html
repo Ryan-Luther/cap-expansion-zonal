@@ -8436,6 +8436,15 @@ self.onmessage = async function(e) {
                         safeSetText('renewable-curtailment-output', ((drMetrics.renewableCurtailment || 0) * 100).toFixed(1));
                     }
 
+                    // Cache results for post-processing, calibration, and price metrics
+                    const drPricesForCache = displayResult?.finalPrices || displayResult?.hourlyPrices;
+                    cachedCoreResults = displayResult;
+                    cachedYear = document.getElementById('yearSelector')?.value;
+                    cachedInstalledCapacities = displayResult?.installedCapacities || installedCapacities;
+                    if (drPricesForCache) {
+                        simPriceMetrics = calculatePriceMetrics(drPricesForCache);
+                    }
+
                     // Return aggregate results for compatibility
                     return {
                         hourlyPrices: displayResult?.finalPrices || displayResult?.hourlyPrices,
