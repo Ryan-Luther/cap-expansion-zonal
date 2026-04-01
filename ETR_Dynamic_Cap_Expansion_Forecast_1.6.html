@@ -704,7 +704,7 @@
         let transferLimits = [];        // [{ from, to, maxMW, slope, intercept, txCapex }] from zone_transfer_limits.csv
         let cachedZonalResults = {};    // { zoneName: { hourlyPrices, hourlyGeneration, ... } } for zone selector switching
         let rawGenDataZonal = {};       // { zoneName: [{ Hour, Technology, CF }, ...] } - zonal capacity factor data (wide format)
-        const MAX_TRANSFER_ITERS = 5;   // Max iterations for inter-zonal transfer convergence
+        const MAX_TRANSFER_ITERS = 3;   // Max iterations for inter-zonal transfer convergence
         const TRANSFER_CONVERGENCE_THRESHOLD = 2.0; // $/MWh max price change to declare convergence
 
         // DOM Element Cache - speeds up updateFinancialTable by avoiding repeated document.getElementById calls
@@ -2771,6 +2771,196 @@
             return new Worker(workerBlobUrl);
         }
         
+        /**
+         * Create a Web Worker blob for parallel zone dispatch.
+         * Serializes runCoreModel and its dependencies into a self-contained worker script.
+         * The worker version reads all costs from zoneCtx (no DOM access).
+         */
+        function createZoneDispatchWorkerBlob() {
+            // Extract function sources at runtime to avoid string escaping issues
+            const runCoreModelSrc = runCoreModel.toString();
+            const isThermalOrStorageSrc = isThermalOrStorage.toString();
+
+            // Build worker code string
+            const workerCode = `
+// ===== ZONE DISPATCH WORKER =====
+// Constants (copied from main thread scope)
+const PRICE_CAP = ${PRICE_CAP};
+const MIN_PRICE_FILTER = ${MIN_PRICE_FILTER};
+const DEFAULT_GAS_PRICE = ${DEFAULT_GAS_PRICE};
+const CARBON_EMISSIONS_GAS = ${CARBON_EMISSIONS_GAS};
+const CARBON_EMISSIONS_COAL = ${CARBON_EMISSIONS_COAL};
+const CARBON_EMISSIONS_OIL = ${CARBON_EMISSIONS_OIL};
+const HEAT_RATE_COAL = ${HEAT_RATE_COAL};
+const HEAT_RATE_OIL = ${HEAT_RATE_OIL};
+const HEAT_RATE_OTHER = ${HEAT_RATE_OTHER};
+const HEAT_RATE_EXISTING_GAS = ${HEAT_RATE_EXISTING_GAS};
+const HEAT_RATE_CCGT = ${HEAT_RATE_CCGT};
+const HEAT_RATE_CT = ${HEAT_RATE_CT};
+
+// Helper: isThermalOrStorage
+${isThermalOrStorageSrc}
+
+// FundamentalCalibrator (minimal version for lookups only)
+class FundamentalCalibrator {
+    constructor() {
+        this.isTrained = false;
+        this.binnedCurve = null;
+        this.binEdges = null;
+        this.mostRecentCompleteYear = null;
+    }
+    _lookupBin(rm) {
+        if (!this.binnedCurve || !this.binEdges) return 0;
+        const rmMin = this.binEdges[0];
+        const rmMax = this.binEdges[this.binEdges.length - 1];
+        const binWidth = (rmMax - rmMin) / (this.binEdges.length - 1);
+        const clampedRM = Math.max(rmMin, Math.min(rmMax, rm));
+        const binIdx = Math.min(this.binnedCurve.length - 1,
+                                Math.floor((clampedRM - rmMin) / binWidth));
+        return this.binnedCurve[binIdx] || 0;
+    }
+    lookupBin(rm) {
+        if (typeof rm !== 'number' || isNaN(rm)) return 0;
+        return this._lookupBin(rm);
+    }
+}
+
+// runCoreModel (extracted from main thread)
+// Patch: replace any residual document.getElementById calls with zoneCtx reads
+const _runCoreModelRaw = ${runCoreModelSrc};
+
+// Wrapper that guarantees no DOM access - intercept document references
+async function runCoreModel(zoneCtx) {
+    return _runCoreModelRaw(zoneCtx);
+}
+
+// Message handler
+self.onmessage = async function(e) {
+    const { zoneId, zoneCtx } = e.data;
+
+    // Reconstruct FundamentalCalibrator from serialized data
+    if (zoneCtx.fundamentalCalibrator) {
+        const cal = new FundamentalCalibrator();
+        cal.isTrained = zoneCtx.fundamentalCalibrator.isTrained;
+        cal.binnedCurve = zoneCtx.fundamentalCalibrator.binnedCurve;
+        cal.binEdges = zoneCtx.fundamentalCalibrator.binEdges;
+        cal.mostRecentCompleteYear = zoneCtx.fundamentalCalibrator.mostRecentCompleteYear;
+        zoneCtx.fundamentalCalibrator = cal;
+    }
+
+    try {
+        const result = await runCoreModel(zoneCtx);
+        // Convert Float64Arrays to regular arrays for postMessage transfer
+        const serializable = { ...result };
+        if (serializable.hourlyPrices) serializable.hourlyPrices = Array.from(serializable.hourlyPrices);
+        if (serializable.netLoad) serializable.netLoad = Array.from(serializable.netLoad);
+        if (serializable.netLoadAfterStorage) serializable.netLoadAfterStorage = Array.from(serializable.netLoadAfterStorage);
+        if (serializable.storagePcharge) serializable.storagePcharge = Array.from(serializable.storagePcharge);
+        if (serializable.storagePdischarge) serializable.storagePdischarge = Array.from(serializable.storagePdischarge);
+        if (serializable.storagePchargeProcessed) serializable.storagePchargeProcessed = Array.from(serializable.storagePchargeProcessed);
+        if (serializable.storagePdischargeProcessed) serializable.storagePdischargeProcessed = Array.from(serializable.storagePdischargeProcessed);
+        if (serializable.storageSOC) serializable.storageSOC = Array.from(serializable.storageSOC);
+        if (serializable.hourlyGeneration) {
+            const hg = {};
+            for (const key in serializable.hourlyGeneration) {
+                hg[key] = Array.from(serializable.hourlyGeneration[key]);
+            }
+            serializable.hourlyGeneration = hg;
+        }
+        self.postMessage({ zoneId, result: serializable });
+    } catch(err) {
+        self.postMessage({ zoneId, error: err.message });
+    }
+};
+`;
+            const blob = new Blob([workerCode], { type: 'application/javascript' });
+            return URL.createObjectURL(blob);
+        }
+
+        /**
+         * Create a pool of zone dispatch workers
+         */
+        function createZoneWorkerPool(poolSize) {
+            const blobUrl = createZoneDispatchWorkerBlob();
+            const workers = Array.from({ length: poolSize }, () => new Worker(blobUrl));
+            return {
+                workers,
+                blobUrl,
+                terminate() {
+                    workers.forEach(w => w.terminate());
+                    URL.revokeObjectURL(blobUrl);
+                }
+            };
+        }
+
+        /**
+         * Dispatch a single zone context to a worker and return a promise
+         */
+        function dispatchToWorker(worker, zoneId, zoneCtx) {
+            return new Promise((resolve, reject) => {
+                worker.onmessage = (e) => {
+                    if (e.data.error) reject(new Error(e.data.error));
+                    else resolve(e.data);
+                };
+                worker.onerror = (e) => reject(new Error('Worker error: ' + e.message));
+
+                // Serialize zoneCtx: convert Float64Arrays and class instances for postMessage
+                const serialCtx = { ...zoneCtx };
+
+                // Serialize hourlyData (array of objects)
+                if (serialCtx.hourlyData && serialCtx.hourlyData.length > 0) {
+                    serialCtx.hourlyData = serialCtx.hourlyData.map(h => ({ ...h }));
+                }
+
+                // Serialize hourlyGasPrices (may be Float64Array)
+                if (serialCtx.hourlyGasPrices instanceof Float64Array) {
+                    serialCtx.hourlyGasPrices = Array.from(serialCtx.hourlyGasPrices);
+                }
+
+                // Serialize fundamentalCalibrator (class instance -> plain object)
+                if (serialCtx.fundamentalCalibrator) {
+                    serialCtx.fundamentalCalibrator = {
+                        isTrained: serialCtx.fundamentalCalibrator.isTrained,
+                        binnedCurve: serialCtx.fundamentalCalibrator.binnedCurve,
+                        binEdges: serialCtx.fundamentalCalibrator.binEdges,
+                        mostRecentCompleteYear: serialCtx.fundamentalCalibrator.mostRecentCompleteYear
+                    };
+                }
+
+                worker.postMessage({ zoneId, zoneCtx: serialCtx });
+            });
+        }
+
+        /**
+         * Dispatch all zones in parallel across the worker pool
+         */
+        async function dispatchZonesParallel(pool, zones, ctxMap) {
+            const promises = zones.map((zone, i) => {
+                const worker = pool.workers[i % pool.workers.length];
+                return dispatchToWorker(worker, zone, ctxMap[zone]);
+            });
+            const rawResults = await Promise.all(promises);
+            const results = {};
+            rawResults.forEach(({ zoneId, result }) => {
+                // Convert arrays back to Float64Arrays for downstream compatibility
+                if (result.hourlyPrices) result.hourlyPrices = new Float64Array(result.hourlyPrices);
+                if (result.netLoad) result.netLoad = new Float64Array(result.netLoad);
+                if (result.netLoadAfterStorage) result.netLoadAfterStorage = new Float64Array(result.netLoadAfterStorage);
+                if (result.storagePcharge) result.storagePcharge = new Float64Array(result.storagePcharge);
+                if (result.storagePdischarge) result.storagePdischarge = new Float64Array(result.storagePdischarge);
+                if (result.storagePchargeProcessed) result.storagePchargeProcessed = new Float64Array(result.storagePchargeProcessed);
+                if (result.storagePdischargeProcessed) result.storagePdischargeProcessed = new Float64Array(result.storagePdischargeProcessed);
+                if (result.storageSOC) result.storageSOC = new Float64Array(result.storageSOC);
+                if (result.hourlyGeneration) {
+                    for (const key in result.hourlyGeneration) {
+                        result.hourlyGeneration[key] = new Float64Array(result.hourlyGeneration[key]);
+                    }
+                }
+                results[zoneId] = result;
+            });
+            return results;
+        }
+
         /**
          * Initialize the simulation worker
          */
@@ -7619,6 +7809,19 @@
             // Get shared config
             const ppConfig = window.ppConfig || DEFAULT_PP_CONFIG;
 
+            // Pre-read DOM values for worker-compatible zone contexts
+            const coalCost = parseFloat(document.getElementById('coal-fuel-cost')?.value || '2');
+            const oilCost = parseFloat(document.getElementById('oil-fuel-cost')?.value || '10');
+            const carbonCostVal = parseFloat(document.getElementById('carbon-cost')?.value) || 0;
+            const techCosts = {};
+            generationTypes.forEach(t => {
+                techCosts[t.id] = {
+                    opex: parseFloat(document.getElementById(`opex-${t.id}`)?.value) || t.opex || 0,
+                    capex: parseFloat(document.getElementById(`capex-${t.id}`)?.value) || t.capex || 0,
+                    life: parseInt(document.getElementById(`life-${t.id}`)?.value) || t.life || 30
+                };
+            });
+
             // Step 1: Build per-zone contexts
             const ctx = {};
             const originalHourlyData = {}; // save originals for transfer adjustment
@@ -7645,14 +7848,41 @@
                     hourlyGasPrices: zoneGasPrices,
                     ppConfig,
                     fundamentalCalibrator: zd.calibrator || fundamentalCalibrator,
-                    baseScalars: zd.baseScalars ?? baseScalars
+                    baseScalars: zd.baseScalars ?? baseScalars,
+                    coalCost,
+                    oilCost,
+                    carbonCost: carbonCostVal,
+                    techCosts
                 };
             });
 
-            // Step 2: Initial per-zone dispatch (no transfers)
+            // Step 2: Initial per-zone dispatch (parallel via Web Workers with fallback)
+            const poolSize = Math.min(navigator.hardwareConcurrency || 4, zones.length);
+            let pool = null;
+            let useWorkers = true;
+
+            try {
+                pool = createZoneWorkerPool(poolSize);
+            } catch(e) {
+                console.warn('Failed to create worker pool, using sequential fallback:', e);
+                useWorkers = false;
+            }
+
             const results = {};
-            for (const zone of zones) {
-                results[zone] = await runCoreModel(ctx[zone]);
+            if (useWorkers && pool) {
+                try {
+                    Object.assign(results, await dispatchZonesParallel(pool, zones, ctx));
+                } catch(e) {
+                    console.warn('Worker dispatch failed, falling back to sequential:', e);
+                    useWorkers = false;
+                    for (const zone of zones) {
+                        results[zone] = await runCoreModel(ctx[zone]);
+                    }
+                }
+            } else {
+                for (const zone of zones) {
+                    results[zone] = await runCoreModel(ctx[zone]);
+                }
             }
 
             // Step 3: Iterative transfer resolution
@@ -7676,8 +7906,21 @@
                     const prevPrices = {};
                     zones.forEach(z => { prevPrices[z] = results[z].hourlyPrices; });
 
-                    for (const zone of zones) {
-                        results[zone] = await runCoreModel(ctx[zone]);
+                    if (useWorkers && pool) {
+                        try {
+                            const newResults = await dispatchZonesParallel(pool, zones, ctx);
+                            Object.assign(results, newResults);
+                        } catch(e) {
+                            console.warn('Worker re-dispatch failed, falling back:', e);
+                            useWorkers = false;
+                            for (const zone of zones) {
+                                results[zone] = await runCoreModel(ctx[zone]);
+                            }
+                        }
+                    } else {
+                        for (const zone of zones) {
+                            results[zone] = await runCoreModel(ctx[zone]);
+                        }
                     }
 
                     // Check convergence
@@ -7743,6 +7986,8 @@
 
             // Step 5: Aggregate to ISO level
             const isoResults = aggregateZonalResults(finalResults, zones);
+
+            if (pool) pool.terminate();
 
             return { zonalResults: finalResults, isoResults };
         }
@@ -8733,8 +8978,9 @@
             if (newGasCtCapacity > 0) {
                 availableAssets.push({ Asset_Name: 'New Build Gas CT', Asset_Type: 'New Gas CT', Capacity_MW: newGasCtCapacity, Heat_Rate: HEAT_RATE_CT });
             }
-            const coalCosts = parseFloat(document.getElementById('coal-fuel-cost').value); const oilCosts = parseFloat(document.getElementById('oil-fuel-cost').value);
-            const carbonCost = parseFloat(document.getElementById('carbon-cost').value) || 0;
+            const coalCosts = zoneCtx.coalCost ?? parseFloat(document.getElementById('coal-fuel-cost')?.value || '2');
+            const oilCosts = zoneCtx.oilCost ?? parseFloat(document.getElementById('oil-fuel-cost')?.value || '10');
+            const carbonCost = zoneCtx.carbonCost ?? (parseFloat(document.getElementById('carbon-cost')?.value) || 0);
             const fullDispatchStack = availableAssets.map(asset => {
                 let fuelCost = 999;
                 let isGasAsset = false;
@@ -9207,9 +9453,15 @@
             }
             let totalCost = 0;
             generationTypes.forEach(tech => {
-                if (tech.id === 'coal' || tech.id === 'oil' || tech.id === 'other' || tech.id === 'imports') return; 
+                if (tech.id === 'coal' || tech.id === 'oil' || tech.id === 'other' || tech.id === 'imports') return;
                 const cap = installedCapacities[tech.id];
-                if (cap > 0) totalCost += (parseFloat(document.getElementById(`opex-${tech.id}`).value) * 12 * cap) + ((parseFloat(document.getElementById(`capex-${tech.id}`).value) * 1000 * cap) / parseInt(document.getElementById(`life-${tech.id}`).value));
+                if (cap > 0) {
+                    const tc = zoneCtx.techCosts?.[tech.id];
+                    const opex = tc ? tc.opex : parseFloat(document.getElementById(`opex-${tech.id}`)?.value || tech.opex);
+                    const capex = tc ? tc.capex : parseFloat(document.getElementById(`capex-${tech.id}`)?.value || tech.capex);
+                    const life = tc ? tc.life : parseInt(document.getElementById(`life-${tech.id}`)?.value || tech.life);
+                    totalCost += (opex * 12 * cap) + ((capex * 1000 * cap) / life);
+                }
             });
             
             const peakHourIndex = hourlyData.reduce((maxIdx, h, i, arr) => h.Load_MW > arr[maxIdx].Load_MW ? i : maxIdx, 0);
