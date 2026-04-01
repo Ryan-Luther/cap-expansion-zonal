@@ -5257,6 +5257,7 @@
             
             // Find the matching ISO column name using normalization
             let loadIsoColumn = iso;
+            let zonalLoadAggregation = false; // ZONAL: flag if we need to sum sub-zone columns
             if (loadRows[0][iso] === undefined) {
                 // Try to find a matching column name
                 const columns = Object.keys(loadRows[0]);
@@ -5264,8 +5265,22 @@
                 if (matchingColumn) {
                     loadIsoColumn = matchingColumn;
                 } else {
-                    showNotification(`No load data for ISO ${iso}`, true); 
-                    return;
+                    // ZONAL: If ISO is zonal, sum sub-zone load columns to create aggregate
+                    if (zoneRegistry[iso]?.isZonal) {
+                        const subZones = zoneRegistry[iso].zones;
+                        const existingSubZones = subZones.filter(z => loadRows[0][z] !== undefined);
+                        if (existingSubZones.length > 0) {
+                            zonalLoadAggregation = true;
+                            loadIsoColumn = existingSubZones[0]; // placeholder, we'll sum manually
+                            console.log(`ZONAL: Aggregating ${existingSubZones.length} zone columns for ${iso} load`);
+                        } else {
+                            showNotification(`No load data for ISO ${iso}`, true);
+                            return;
+                        }
+                    } else {
+                        showNotification(`No load data for ISO ${iso}`, true);
+                        return;
+                    }
                 }
             }
 
@@ -5312,7 +5327,18 @@
             };
             
             loadRows.forEach((loadRow, i) => {
-                const obj = { Load_MW: parseFloat(loadRow[loadIsoColumn]) };
+                // ZONAL: If aggregating sub-zone loads, sum all sub-zone columns
+                let loadMW;
+                if (zonalLoadAggregation) {
+                    loadMW = 0;
+                    zoneRegistry[iso].zones.forEach(z => {
+                        const val = parseFloat(loadRow[z]);
+                        if (!isNaN(val)) loadMW += val;
+                    });
+                } else {
+                    loadMW = parseFloat(loadRow[loadIsoColumn]);
+                }
+                const obj = { Load_MW: loadMW };
                 
                 // Add tech columns
                 generationTypes.forEach(tech => {
@@ -5739,6 +5765,9 @@
             if (isoChanged) {
                 triggerAutoCalibrationIfReady();
             }
+
+            // ZONAL: Ensure zone selector is up-to-date at end of assumptions application
+            updateZoneSelector();
         }
 
         // --- Other UI & Logic ---
@@ -6386,6 +6415,8 @@
                 console.log('=== Auto-Calibration Complete ===');
             } finally {
                 isAutoCalibrating = false;
+                // ZONAL: Ensure zone selector is visible after auto-calibration completes
+                updateZoneSelector();
             }
         }
         
@@ -6875,8 +6906,8 @@
                 cachedYear = null;
                 cachedCoreResults = null;
                 await applyAssumptions();
-                // Note: restoreSavedCapacities() is not needed here because applyAssumptions() 
-                // already handles restoring saved data at lines 4847-4884
+                // ZONAL: Ensure zone selector is updated after full applyAssumptions completes
+                updateZoneSelector();
             });
             // Clear cache and apply assumptions when year changes to force fresh model run
             // This prevents stale etrCapacities and cachedYear from affecting calculations
@@ -7696,8 +7727,8 @@
                 const financials = getFinancialsWithMetrics(
                     results[zone].hourlyGeneration, ppResult.finalPrices,
                     ctx[zone].installedCapacities, marketMetrics, conf,
-                    null, results[zone].existingGasWeightedHeatRate,
-                    generationTypes, ctx[zone].etrCapacities, ctx[zone].hourlyGasPrices
+                    {}, results[zone].existingGasWeightedHeatRate,
+                    generationTypes, ctx[zone].etrCapacities, currentTaxCredits, null
                 );
 
                 finalResults[zone] = {
