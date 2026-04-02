@@ -8009,7 +8009,25 @@ self.onmessage = async function(e) {
             const netTransfers = {};
             zones.forEach(z => { netTransfers[z] = new Float64Array(hours); });
 
+            // Compute available surplus per zone per hour (generation capacity - load)
+            // to cap total exports and prevent zones from being drained
+            const zoneSurplus = {};
+            zones.forEach(z => {
+                const zr = results[z];
+                if (!zr) return;
+                const totalCap = Object.values(zr.installedCapacities || {}).reduce((a,b) => a+b, 0);
+                const netLoad = zr.netLoad || zr.hourlyData?.map(h => h.Load_MW) || [];
+                zoneSurplus[z] = new Float64Array(hours);
+                for (let h = 0; h < hours; h++) {
+                    zoneSurplus[z][h] = Math.max(0, totalCap - (netLoad[h] || 0));
+                }
+            });
+
             for (let h = 0; h < hours; h++) {
+                // Track running net exports per zone this hour
+                const runningExport = {};
+                zones.forEach(z => { runningExport[z] = 0; });
+
                 limits.forEach(corridor => {
                     const priceFrom = results[corridor.from]?.hourlyPrices?.[h] || 0;
                     const priceTo = results[corridor.to]?.hourlyPrices?.[h] || 0;
@@ -8017,7 +8035,20 @@ self.onmessage = async function(e) {
 
                     // Flow from low-price to high-price zone
                     let rawFlow = corridor.slope * priceDiff + corridor.intercept;
-                    const flow = Math.max(-corridor.maxMW, Math.min(corridor.maxMW, rawFlow));
+                    let flow = Math.max(-corridor.maxMW, Math.min(corridor.maxMW, rawFlow));
+
+                    // Cap exports: exporting zone can't export more than its surplus
+                    if (flow > 0) {
+                        // from exports to to
+                        const availableExport = Math.max(0, (zoneSurplus[corridor.from]?.[h] || 0) - runningExport[corridor.from]);
+                        flow = Math.min(flow, availableExport);
+                        runningExport[corridor.from] += flow;
+                    } else if (flow < 0) {
+                        // to exports to from (reverse flow)
+                        const availableExport = Math.max(0, (zoneSurplus[corridor.to]?.[h] || 0) - runningExport[corridor.to]);
+                        flow = Math.max(flow, -availableExport);
+                        runningExport[corridor.to] += Math.abs(flow);
+                    }
 
                     // Positive flow = from → to
                     netTransfers[corridor.from][h] -= flow; // exporting = increases effective load
